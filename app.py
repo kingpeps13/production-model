@@ -11,26 +11,21 @@ from openpyxl import Workbook
 st.set_page_config(page_title="Модель расчёта производства", layout="wide")
 st.title("🏭 Модель расчёта календарного времени выполнения заказа")
 
-# ================== Инициализация сессии ==================
+# ================== Инициализация сессии (все поля пустые по умолчанию) ==================
 if 'operations' not in st.session_state:
-    st.session_state.operations = [
-        {"name": "Розлив", "prod": 212.0, "setup": 2.0, "equip": 1, "people": 1, "daily_setup": True, "max_hours_per_day": 8.0},
-        {"name": "Этикетировка", "prod": 200.0, "setup": 0.25, "equip": 1, "people": 1, "daily_setup": False, "max_hours_per_day": 8.0},
-        {"name": "Датировка", "prod": 1000.0, "setup": 0.1, "equip": 1, "people": 1, "daily_setup": False, "max_hours_per_day": 8.0},
-        {"name": "Упаковка", "prod": 350.0, "setup": 0.5, "equip": 1, "people": 2, "daily_setup": True, "max_hours_per_day": 8.0}
-    ]
+    st.session_state.operations = []  # пустой список операций
 if 'grammovki' not in st.session_state:
-    st.session_state.grammovki = [3, 5]
+    st.session_state.grammovki = []
 if 'gram_counts' not in st.session_state:
-    st.session_state.gram_counts = {3: 500, 5: 700}
+    st.session_state.gram_counts = {}
 if 'product_name' not in st.session_state:
-    st.session_state.product_name = "Клей 3-5"
+    st.session_state.product_name = ""
 if 'shift_start' not in st.session_state:
     st.session_state.shift_start = 8.0
 if 'shift_duration' not in st.session_state:
     st.session_state.shift_duration = 9.0
 if 'is_glue' not in st.session_state:
-    st.session_state.is_glue = True
+    st.session_state.is_glue = False
 if 'result' not in st.session_state:
     st.session_state.result = None
 if 'template_name' not in st.session_state:
@@ -46,7 +41,7 @@ def template_to_json():
         "shift_duration": st.session_state.shift_duration,
         "is_glue": st.session_state.is_glue,
         "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
-        "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},   # ← добавляем
+        "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
         "operations": st.session_state.operations,
         "version": "1.2.0"
     }
@@ -54,13 +49,26 @@ def template_to_json():
 
 def load_template_from_json(json_str):
     data = json.loads(json_str)
-    st.session_state.product_name = data.get('product_name', 'Продукт')
+    st.session_state.product_name = data.get('product_name', "")
     st.session_state.shift_start = data.get('shift_start', 8.0)
     st.session_state.shift_duration = data.get('shift_duration', 9.0)
     st.session_state.is_glue = data.get('is_glue', False)
-    st.session_state.grammovki = data.get('grammovki', [3, 5])
-    st.session_state.gram_counts = data.get('gram_counts', {3: 500, 5: 700})   # ← добавляем
+    st.session_state.grammovki = data.get('grammovki', [])
+    st.session_state.gram_counts = data.get('gram_counts', {})
     st.session_state.operations = data.get('operations', [])
+    st.session_state.result = None
+    st.rerun()
+
+def clear_all():
+    """Сбрасывает все параметры на начальные (пустые)"""
+    st.session_state.operations = []
+    st.session_state.grammovki = []
+    st.session_state.gram_counts = {}
+    st.session_state.product_name = ""
+    st.session_state.shift_start = 8.0
+    st.session_state.shift_duration = 9.0
+    st.session_state.is_glue = False
+    st.session_state.correction_choice = False
     st.session_state.result = None
     st.rerun()
 
@@ -266,17 +274,19 @@ def calculate(data, Q, N, correction_choice):
 with st.sidebar:
     st.header("📋 Параметры заказа")
 
+    # --- Загрузка шаблона ---
     uploaded_file = st.file_uploader("Загрузить шаблон (JSON)", type=["json"])
     if uploaded_file is not None:
         try:
             json_str = uploaded_file.read().decode('utf-8')
             load_template_from_json(json_str)
-            st.success("Шаблон загружен!")
+            st.success("✅ Шаблон загружен! Все поля обновлены.")
         except Exception as e:
             st.error(f"Ошибка загрузки: {e}")
 
     st.divider()
 
+    # --- Основные параметры ---
     st.session_state.product_name = st.text_input("Наименование продукта", value=st.session_state.product_name, key='pn_input')
     st.session_state.shift_start = st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, value=st.session_state.shift_start, step=0.5, key='ss_input')
     st.session_state.shift_duration = st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, value=st.session_state.shift_duration, step=0.5, key='sd_input')
@@ -290,13 +300,12 @@ with st.sidebar:
         st.session_state.gram_counts = {}
         total_q = 0
         for g in selected:
-            default_cnt = st.session_state.gram_counts.get(g, 500)
-            cnt = st.number_input(f"Количество {g} мл", min_value=0, value=default_cnt, step=100, key=f"g_{g}")
+            default_cnt = st.session_state.gram_counts.get(g, 0)
+            cnt = st.number_input(f"Количество {g} мл", min_value=0, value=default_cnt, step=50, key=f"g_{g}")
             st.session_state.gram_counts[g] = cnt
             total_q += cnt
         Q = total_q
         st.info(f"Общий заказ: {Q} шт")
-
         st.session_state.correction_choice = st.checkbox(
             "Корректировать заказ до полных 4-кг канистр (увеличить)",
             value=st.session_state.correction_choice,
@@ -309,6 +318,8 @@ with st.sidebar:
     N = st.number_input("Размер наряда (передаточной партии)", min_value=1, value=600, step=100, key='n_input')
 
     st.divider()
+
+    # --- Операции ---
     st.subheader("🔧 Операции")
     for i, op in enumerate(st.session_state.operations):
         with st.expander(f"Операция {i+1}: {op['name']}"):
@@ -330,6 +341,8 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+
+    # --- Сохранение шаблона ---
     template_name = st.text_input("Имя шаблона для сохранения", value=st.session_state.template_name, key='template_name_input')
     st.session_state.template_name = template_name if template_name else "template"
     json_data = template_to_json()
@@ -341,6 +354,14 @@ with st.sidebar:
     )
 
     st.divider()
+
+    # --- Кнопка "Очистить всё" ---
+    if st.button("🧹 Очистить всё", type="secondary", use_container_width=True):
+        clear_all()
+
+    st.divider()
+
+    # --- Кнопка расчёта ---
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
         data = {
             "product_name": st.session_state.product_name,
@@ -422,8 +443,6 @@ if st.session_state.result is not None:
     # ================== ДИАГРАММА ГАНТА (с днями) ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
-        shift_hour = int(result['shift_start'])
-        shift_min = int((result['shift_start'] % 1) * 60)
         hours_per_day = result['hours_per_day']
 
         # ---- Собираем данные по операциям и дням ----
@@ -535,7 +554,7 @@ if st.session_state.result is not None:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # ---- Отладка (показывает, какие операции найдены) ----
+            # ---- Отладка ----
             with st.expander("🔍 Операции, найденные в данных"):
                 debug_data = []
                 for op, segs in ops_dict.items():

@@ -32,6 +32,8 @@ if 'is_glue' not in st.session_state:
     st.session_state.is_glue = True
 if 'result' not in st.session_state:
     st.session_state.result = None
+if 'template_name' not in st.session_state:
+    st.session_state.template_name = "template"
 
 # ================== Функции шаблонов ==================
 def template_to_json():
@@ -67,10 +69,12 @@ def calculate(data, Q, N):
     hours_per_day = shift_duration
 
     # ---- Блок для клея (общий вес и канистры) ----
-    can_count = 0
+    can_count_4kg = 0
+    can_count_1kg = 0
     remainder_grams = 0.0
     total_weight = 0.0
-    can_weight = 4000.0  # грамм в канистре
+    can_weight_4kg = 4000.0
+    can_weight_1kg = 1000.0
     weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
     gram_counts = data.get('gram_counts', {})
 
@@ -78,8 +82,11 @@ def calculate(data, Q, N):
         total_weight = 0.0
         for g, cnt in gram_counts.items():
             total_weight += cnt * weight_map.get(g, 0)
-        can_count = int(total_weight // can_weight)
-        remainder_grams = total_weight % can_weight
+        can_count_4kg = int(total_weight // can_weight_4kg)
+        remainder_grams = total_weight % can_weight_4kg
+        # Количество 1-кг канистр (округляем вверх общий вес в кг)
+        total_kg = total_weight / 1000.0
+        can_count_1kg = math.ceil(total_kg)
 
     # ---- Основные расчёты по операциям ----
     for op in operations:
@@ -220,7 +227,8 @@ def calculate(data, Q, N):
         'product_name': product_name,
         'operations': operations,
         'is_glue': is_glue,
-        'can_count': can_count,
+        'can_count_4kg': can_count_4kg,
+        'can_count_1kg': can_count_1kg,
         'remainder_grams': remainder_grams,
         'total_weight': total_weight,
         'gram_counts': gram_counts
@@ -287,11 +295,14 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    # Поле для имени шаблона
+    template_name = st.text_input("Имя шаблона для сохранения", value=st.session_state.template_name, key='template_name_input')
+    st.session_state.template_name = template_name if template_name else "template"
     json_data = template_to_json()
     st.download_button(
         label="💾 Скачать шаблон (JSON)",
         data=json_data,
-        file_name="template.json",
+        file_name=f"{st.session_state.template_name}.json",
         mime="application/json"
     )
 
@@ -329,13 +340,14 @@ if st.session_state.result is not None:
     col4.metric("📅 Рабочих дней", result['days_needed'])
 
     if result['is_glue']:
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
-        c2.metric("📦 Полных канистр (4 кг)", result['can_count'])
+        c2.metric("📦 Канистр 4 кг", result['can_count_4kg'])
+        c3.metric("📦 Канистр 1 кг (эквивалент)", result['can_count_1kg'])
         if result['remainder_grams'] > 0:
-            c3.metric("⚠️ Остаток в неполной канистре", f"{result['remainder_grams']:.2f} г")
+            c4.metric("⚠️ Остаток в неполной 4-кг канистре", f"{result['remainder_grams']:.2f} г")
         else:
-            c3.metric("✅ Остаток", "0 г (всё кратно)")
+            c4.metric("✅ Остаток", "0 г (всё кратно)")
 
     st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
     st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
@@ -365,7 +377,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ДИАГРАММА ГАНТА (исправленная) ==================
+    # ================== ИСПРАВЛЕННАЯ ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         try:
@@ -375,11 +387,13 @@ if st.session_state.result is not None:
                 start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
                 end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
                 df_gantt.append(dict(Task=op_name, Start=start_dt, Finish=end_dt, Resource=label))
+            df_gantt = pd.DataFrame(df_gantt)
+            # Явно задаём порядок операций на оси Y
             fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
                               color="Resource",
                               title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-                              color_discrete_sequence=px.colors.qualitative.Set3)
-            # Убираем update_yaxis, чтобы избежать ошибки
+                              color_discrete_sequence=px.colors.qualitative.Set3,
+                              category_orders={"Task": result['name_list']})
             fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
                               height=600, font=dict(size=10),
                               legend_title='Интервалы')
@@ -405,7 +419,8 @@ if st.session_state.result is not None:
         ws1.append(["Трудоёмкость (чел·ч)", result['total_labor']])
         if result['is_glue']:
             ws1.append(["Общий вес (г)", result['total_weight']])
-            ws1.append(["Полных канистр", result['can_count']])
+            ws1.append(["Канистр 4 кг", result['can_count_4kg']])
+            ws1.append(["Канистр 1 кг (эквивалент)", result['can_count_1kg']])
             ws1.append(["Остаток (г)", result['remainder_grams']])
 
         ws2 = wb.create_sheet("Операции")

@@ -5,7 +5,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 import io
-import matplotlib
 from openpyxl import Workbook
 
 st.set_page_config(page_title="Модель расчёта производства", layout="wide")
@@ -420,72 +419,185 @@ if st.session_state.result is not None:
         st.info("Нет данных по дням")
 
         # ================== ДИАГРАММА ГАНТА (matplotlib) ==================
-    st.subheader("📈 Диаграмма Ганта")
-    if result['all_intervals']:
-        try:
-            import matplotlib.pyplot as plt
-            import matplotlib.dates as mdates
-            from datetime import datetime, timedelta
+    # ================== ДИАГРАММА ГАНТА (Plotly) ==================
 
-            fig, ax = plt.subplots(figsize=(14, 6))
-            # Группируем интервалы по операциям
-            op_groups = {}
-            for start, end, label, color in result['all_intervals']:
-                op_name = label.split(' (')[0] if not label.startswith('Наладка') else label.replace('Наладка ', '')
-                if op_name not in op_groups:
-                    op_groups[op_name] = []
-                op_groups[op_name].append((start, end, label, color))
+st.subheader("📈 Диаграмма Ганта")
 
-            # Упорядочиваем по порядку из списка операций
-            ordered_ops = result['name_list']
-            y_pos = 0
-            y_ticks = []
-            colors_map = {'#1f77b4': '#1f77b4', '#ff7f0e': '#ff7f0e', '#2ca02c': '#2ca02c',
-                          '#d62728': '#d62728', '#9467bd': '#9467bd', '#8c564b': '#8c564b',
-                          '#e377c2': '#e377c2', '#7f7f7f': '#7f7f7f', '#bcbd22': '#bcbd22',
-                          '#17becf': '#17becf'}
-            for op_name in ordered_ops:
-                if op_name not in op_groups:
-                    continue
-                intervals = op_groups[op_name]
-                intervals.sort(key=lambda x: x[0])  # по времени начала
-                for start, end, label, color in intervals:
-                    start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
-                    end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
-                    ax.barh(y_pos, (end_dt - start_dt).total_seconds()/3600, left=start_dt,
-                            color=color, edgecolor='black', height=0.5)
-                    # Подпись внутри полосы, если достаточно места
-                    if end - start > 0.3:
-                        ax.text(start_dt + (end_dt - start_dt)/2, y_pos, label,
-                                ha='center', va='center', fontsize=7,
-                                color='white' if sum([int(c,16) for c in color[1:3]]) < 200 else 'black')
-                    y_pos += 1
-                y_ticks.append((y_pos - len(intervals)/2 - 0.5, op_name))
+if result['all_intervals']:
 
-            # Вертикальная линия окончания заказа
-            T = result['T']
-            T_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=T)
-            ax.axvline(x=T_dt, color='red', linestyle='--', linewidth=2,
-                       label=f'Окончание заказа ({T:.2f} ч)')
+    rows = []
 
-            # Настройка оси X
-            ax.set_xlabel('Время')
-            ax.set_ylabel('Операции')
-            ax.set_title(f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)')
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m %H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
-            ax.xaxis.set_minor_locator(mdates.HourLocator(interval=1))
-            fig.autofmt_xdate()
-            ax.set_yticks([pos for pos, _ in y_ticks])
-            ax.set_yticklabels([name for _, name in y_ticks])
-            ax.grid(axis='x', linestyle='--', alpha=0.5)
-            ax.legend()
-            plt.tight_layout()
-            st.pyplot(fig)
-        except Exception as e:
-            st.error(f"Ошибка при построении диаграммы: {e}")
-    else:
-        st.info("Нет данных для построения диаграммы")
+    shift_hour = int(result['shift_start'])
+    shift_min = int((result['shift_start'] % 1) * 60)
+
+    base_dt = datetime(
+        2026,
+        1,
+        1,
+        shift_hour,
+        shift_min
+    )
+
+    for start, end, label, color in result['all_intervals']:
+
+        if label.startswith("Наладка"):
+
+            operation = label.replace(
+                "Наладка ",
+                ""
+            )
+
+            work_type = "Наладка"
+
+        else:
+
+            operation = label.split(" (")[0]
+
+            work_type = "Работа"
+
+        rows.append({
+
+            "Операция": operation,
+
+            "Начало":
+                base_dt +
+                timedelta(hours=start),
+
+            "Окончание":
+                base_dt +
+                timedelta(hours=end),
+
+            "Описание": label,
+
+            "Тип": work_type
+
+        })
+
+    df_gantt = pd.DataFrame(rows)
+
+    fig = px.timeline(
+
+        df_gantt,
+
+        x_start="Начало",
+
+        x_end="Окончание",
+
+        y="Операция",
+
+        color="Тип",
+
+        hover_name="Описание",
+
+        hover_data={
+
+            "Начало": True,
+
+            "Окончание": True,
+
+            "Тип": True,
+
+            "Операция": False,
+
+            "Описание": False
+
+        }
+
+    )
+
+    fig.update_yaxes(
+
+        autorange="reversed"
+
+    )
+
+    fig.update_layout(
+
+        height=max(
+
+            450,
+
+            len(result['name_list']) * 90
+
+        ),
+
+        xaxis_title="Дата и время",
+
+        yaxis_title="Операция",
+
+        legend_title="Тип",
+
+        hoverlabel=dict(
+
+            bgcolor="white",
+
+            font_size=13
+
+        )
+
+    )
+
+    fig.update_xaxes(
+
+        showgrid=True,
+
+        tickformat="%d.%m %H:%M",
+
+        rangeslider_visible=True
+
+    )
+
+    finish_dt = (
+
+        base_dt +
+
+        timedelta(
+
+            hours=result['T']
+
+        )
+
+    )
+
+    fig.add_vline(
+
+        x=finish_dt,
+
+        line_width=2,
+
+        line_dash="dash",
+
+        line_color="red"
+
+    )
+
+    fig.add_annotation(
+
+        x=finish_dt,
+
+        y=1,
+
+        yref="paper",
+
+        text=f"Конец заказа<br>{result['T']:.2f} ч",
+
+        showarrow=False,
+
+        bgcolor="white"
+
+    )
+
+    st.plotly_chart(
+
+        fig,
+
+        use_container_width=True
+
+    )
+
+else:
+
+    st.info("Нет данных для построения диаграммы")
 
     # ================== Экспорт в Excel ==================
     st.subheader("💾 Экспорт")

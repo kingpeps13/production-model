@@ -83,20 +83,16 @@ def calculate(data, Q, N, correction_choice):
     if is_glue:
         total_weight = sum(cnt * weight_map.get(g, 0) for g, cnt in gram_counts.items())
         can_weight_4kg = 4000.0
-        # 4-кг канистры
         can_count_4kg = math.ceil(total_weight / can_weight_4kg)
         rem4 = total_weight % can_weight_4kg
         shortage_4kg = 0.0 if rem4 == 0 else can_weight_4kg - rem4
 
-        # 1-кг канистры
         can_count_1kg = math.ceil(total_weight / 1000.0)
         rem1 = total_weight % 1000.0
         shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
 
-        # Корректировка до полных 4-кг канистр
         if rem4 != 0 and correction_choice:
-            need_weight = shortage_4kg  # недостающие граммы
-            # выбираем самую тяжёлую дозу
+            need_weight = shortage_4kg
             max_g = max(gram_counts.keys(), key=lambda g: weight_map.get(g, 0))
             dose_weight = weight_map[max_g]
             add_doses = math.ceil(need_weight / dose_weight)
@@ -104,7 +100,6 @@ def calculate(data, Q, N, correction_choice):
             total_weight += add_doses * dose_weight
             corrected = True
             Q = sum(gram_counts.values())
-            # пересчёт канистр и остатков
             can_count_4kg = math.ceil(total_weight / can_weight_4kg)
             rem4 = total_weight % can_weight_4kg
             shortage_4kg = 0.0 if rem4 == 0 else can_weight_4kg - rem4
@@ -131,7 +126,7 @@ def calculate(data, Q, N, correction_choice):
         daily_setup_list.append(op.get("daily_setup", False))
         max_hours_list.append(op.get("max_hours_per_day", hours_per_day))
 
-    # Симуляция
+    # ---- Симуляция с заполнением all_intervals ----
     op_intervals = [[] for _ in range(len(operations))]
     all_intervals = []
     equip_free = [0.0] * len(operations)
@@ -153,10 +148,12 @@ def calculate(data, Q, N, correction_choice):
             while True:
                 day_start = (start // hours_per_day) * hours_per_day
                 day_end = day_start + hours_per_day
+
                 used_in_day = 0.0
                 for (s, e) in op_intervals[i]:
                     if s < day_end and e > day_start:
                         used_in_day += (min(e, day_end) - max(s, day_start))
+
                 if daily:
                     setup_done = False
                     for (s, e) in op_intervals[i]:
@@ -166,9 +163,11 @@ def calculate(data, Q, N, correction_choice):
                     if not setup_done:
                         setup_start = day_start
                         setup_end = min(day_start + setup, day_end)
-                        op_intervals[i].append((setup_start, setup_end))
-                        all_intervals.append((setup_start, setup_end, f"Наладка {op['name']}", 'gray'))
-                        used_in_day += (setup_end - setup_start)
+                        if setup_end > setup_start:
+                            op_intervals[i].append((setup_start, setup_end))
+                            all_intervals.append((setup_start, setup_end, f"Наладка {op['name']}", 'gray'))
+                            used_in_day += (setup_end - setup_start)
+
                 free_in_day = max_h - used_in_day
                 if free_in_day >= t_i:
                     real_start = start
@@ -184,7 +183,7 @@ def calculate(data, Q, N, correction_choice):
     T = max(end for _, end, _, _ in all_intervals) if all_intervals else 0
     days_needed = math.ceil(T / hours_per_day)
 
-    # Трудоёмкость и дни работы
+    # ---- Трудоёмкость и дни работы ----
     total_labor = 0.0
     labor_details = []
     days_work_list = []
@@ -211,7 +210,7 @@ def calculate(data, Q, N, correction_choice):
     idx_max = t_list.index(t_max) if t_list else 0
     bottleneck_name = name_list[idx_max] if t_list else ""
 
-    # Загрузка по дням
+    # ---- Загрузка по дням ----
     day_usage_dict = {}
     for day in range(days_needed):
         day_start = day * hours_per_day
@@ -420,109 +419,116 @@ if st.session_state.result is not None:
     # ================== ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
+        # ---- Подготовка данных для диаграммы ----
         rows = []
         shift_hour = int(result['shift_start'])
         shift_min = int((result['shift_start'] % 1) * 60)
         base_dt = datetime(2026, 1, 1, shift_hour, shift_min)
 
         for start, end, label, color in result['all_intervals']:
-            # Определяем операцию и тип
+            # Извлекаем операцию и тип
             if label.startswith("Наладка"):
-                operation = label.replace("Наладка ", "")
+                operation = label.replace("Наладка ", "").strip()
                 work_type = "Наладка"
-                group = "Наладка"          # для цвета
                 naryad = None
             else:
-                # Формат: "Розлив (нар.1)" или "Розлив (нар.2)"
-                parts = label.split(" (")
-                operation = parts[0]
-                work_type = "Работа"
-                group = operation
-                # извлекаем номер наряда
-                if len(parts) > 1:
-                    naryad = parts[1].replace(")", "").replace("нар.", "").strip()
+                if " (нар." in label:
+                    op_part, naryad_part = label.split(" (нар.")
+                    operation = op_part.strip()
+                    naryad = naryad_part.replace(")", "").strip()
                 else:
+                    operation = label.strip()
                     naryad = None
+                work_type = "Работа"
+
+            if end <= start:
+                continue
 
             rows.append({
                 "Операция": operation,
                 "Начало": base_dt + timedelta(hours=start),
                 "Окончание": base_dt + timedelta(hours=end),
-                "Группа": group,
                 "Тип": work_type,
                 "Наряд": naryad,
-                "Описание": label,
-                "Длительность (ч)": round(end - start, 2)
+                "Длительность (ч)": round(end - start, 2),
+                "Описание": label
             })
 
-        df_gantt = pd.DataFrame(rows)
+        if not rows:
+            st.info("Нет интервалов для отображения")
+        else:
+            df_gantt = pd.DataFrame(rows)
 
-        # Создаём словарь цветов: для наладки серый, для операций – из палитры
-        unique_ops = result['name_list']
-        colors_palette = px.colors.qualitative.Plotly
-        op_colors = {op: colors_palette[i % len(colors_palette)] for i, op in enumerate(unique_ops)}
-        op_colors["Наладка"] = "gray"
+            # ---- Цвета: для наладки серый, для операций – палитра ----
+            ops = result['name_list']
+            palette = px.colors.qualitative.Plotly
+            color_map = {op: palette[i % len(palette)] for i, op in enumerate(ops)}
+            color_map["Наладка"] = "gray"
 
-        fig = px.timeline(
-            df_gantt,
-            x_start="Начало",
-            x_end="Окончание",
-            y="Операция",
-            color="Группа",
-            color_discrete_map=op_colors,
-            hover_name="Описание",
-            hover_data={
-                "Начало": True,
-                "Окончание": True,
-                "Тип": True,
-                "Наряд": True,
-                "Длительность (ч)": True,
-                "Операция": False,
-                "Группа": False,
-                "Описание": False,
-            },
-            title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-            labels={"Операция": "Операция"}
-        )
+            # ---- Строим диаграмму ----
+            fig = px.timeline(
+                df_gantt,
+                x_start="Начало",
+                x_end="Окончание",
+                y="Операция",
+                color="Тип",
+                color_discrete_map=color_map,
+                hover_name="Описание",
+                hover_data={
+                    "Начало": True,
+                    "Окончание": True,
+                    "Тип": True,
+                    "Наряд": True,
+                    "Длительность (ч)": True,
+                    "Операция": False,
+                    "Описание": False,
+                },
+                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                labels={"Операция": "Операция"}
+            )
 
-        # Устанавливаем порядок операций на оси Y (сверху вниз – как в списке)
-        fig.update_yaxes(
-            autorange="reversed",
-            categoryorder='array',
-            categoryarray=result['name_list']
-        )
+            # ---- Порядок операций (сверху вниз) ----
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder='array',
+                categoryarray=ops
+            )
 
-        # Настройка оси X (дата и время)
-        fig.update_xaxes(
-            showgrid=True,
-            tickformat="%d.%m %H:%M",
-            rangeslider_visible=True,
-            title_text="Дата и время"
-        )
+            # ---- Ось X с реальным временем ----
+            fig.update_xaxes(
+                showgrid=True,
+                tickformat="%d.%m %H:%M",
+                rangeslider_visible=True,
+                title_text="Дата и время"
+            )
 
-        # Вертикальная красная линия окончания заказа
-        finish_dt = base_dt + timedelta(hours=result['T'])
-        fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
-        fig.add_annotation(
-            x=finish_dt,
-            y=1,
-            yref="paper",
-            text=f"Конец заказа<br>{result['T']:.2f} ч",
-            showarrow=False,
-            bgcolor="white",
-            font=dict(size=12)
-        )
+            # ---- Красная линия окончания заказа ----
+            finish_dt = base_dt + timedelta(hours=result['T'])
+            fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
+            fig.add_annotation(
+                x=finish_dt,
+                y=1,
+                yref="paper",
+                text=f"Конец заказа<br>{result['T']:.2f} ч",
+                showarrow=False,
+                bgcolor="white",
+                font=dict(size=12)
+            )
 
-        # Дополнительные настройки внешнего вида
-        fig.update_layout(
-            height=max(450, len(result['name_list']) * 90),
-            xaxis_title="Дата и время",
-            yaxis_title="Операция",
-            legend_title="Группа",
-            hoverlabel=dict(bgcolor="white", font_size=13)
-        )
+            # ---- Общий вид ----
+            fig.update_layout(
+                height=max(450, len(ops) * 90),
+                xaxis_title="Дата и время",
+                yaxis_title="Операция",
+                legend_title="Тип",
+                hoverlabel=dict(bgcolor="white", font_size=13)
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ---- (Опционально) Отладочная таблица ----
+            with st.expander("🔍 Данные диаграммы (для проверки)"):
+                st.dataframe(df_gantt)
     else:
         st.info("Нет данных для построения диаграммы")
 

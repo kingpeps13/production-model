@@ -376,7 +376,6 @@ if st.session_state.result is not None:
     col4.metric("📅 Рабочих дней", result['days_needed'])
 
     if result['is_glue']:
-        # 5 колонок для информации о канистрах
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
         c2.metric("📦 4-кг канистр (всего)", result['can_count_4kg'])
@@ -418,186 +417,72 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-        # ================== ДИАГРАММА ГАНТА (matplotlib) ==================
     # ================== ДИАГРАММА ГАНТА (Plotly) ==================
+    st.subheader("📈 Диаграмма Ганта")
+    if result['all_intervals']:
+        rows = []
+        shift_hour = int(result['shift_start'])
+        shift_min = int((result['shift_start'] % 1) * 60)
+        base_dt = datetime(2026, 1, 1, shift_hour, shift_min)
 
-st.subheader("📈 Диаграмма Ганта")
+        for start, end, label, color in result['all_intervals']:
+            if label.startswith("Наладка"):
+                operation = label.replace("Наладка ", "")
+                work_type = "Наладка"
+            else:
+                operation = label.split(" (")[0]
+                work_type = "Работа"
 
-if result['all_intervals']:
+            rows.append({
+                "Операция": operation,
+                "Начало": base_dt + timedelta(hours=start),
+                "Окончание": base_dt + timedelta(hours=end),
+                "Описание": label,
+                "Тип": work_type
+            })
 
-    rows = []
-
-    shift_hour = int(result['shift_start'])
-    shift_min = int((result['shift_start'] % 1) * 60)
-
-    base_dt = datetime(
-        2026,
-        1,
-        1,
-        shift_hour,
-        shift_min
-    )
-
-    for start, end, label, color in result['all_intervals']:
-
-        if label.startswith("Наладка"):
-
-            operation = label.replace(
-                "Наладка ",
-                ""
-            )
-
-            work_type = "Наладка"
-
-        else:
-
-            operation = label.split(" (")[0]
-
-            work_type = "Работа"
-
-        rows.append({
-
-            "Операция": operation,
-
-            "Начало":
-                base_dt +
-                timedelta(hours=start),
-
-            "Окончание":
-                base_dt +
-                timedelta(hours=end),
-
-            "Описание": label,
-
-            "Тип": work_type
-
-        })
-
-    df_gantt = pd.DataFrame(rows)
-
-    fig = px.timeline(
-
-        df_gantt,
-
-        x_start="Начало",
-
-        x_end="Окончание",
-
-        y="Операция",
-
-        color="Тип",
-
-        hover_name="Описание",
-
-        hover_data={
-
-            "Начало": True,
-
-            "Окончание": True,
-
-            "Тип": True,
-
-            "Операция": False,
-
-            "Описание": False
-
-        }
-
-    )
-
-    fig.update_yaxes(
-
-        autorange="reversed"
-
-    )
-
-    fig.update_layout(
-
-        height=max(
-
-            450,
-
-            len(result['name_list']) * 90
-
-        ),
-
-        xaxis_title="Дата и время",
-
-        yaxis_title="Операция",
-
-        legend_title="Тип",
-
-        hoverlabel=dict(
-
-            bgcolor="white",
-
-            font_size=13
-
+        df_gantt = pd.DataFrame(rows)
+        fig = px.timeline(
+            df_gantt,
+            x_start="Начало",
+            x_end="Окончание",
+            y="Операция",
+            color="Тип",
+            hover_name="Описание",
+            hover_data={
+                "Начало": True,
+                "Окончание": True,
+                "Тип": True,
+                "Операция": False,
+                "Описание": False
+            }
         )
-
-    )
-
-    fig.update_xaxes(
-
-        showgrid=True,
-
-        tickformat="%d.%m %H:%M",
-
-        rangeslider_visible=True
-
-    )
-
-    finish_dt = (
-
-        base_dt +
-
-        timedelta(
-
-            hours=result['T']
-
+        fig.update_yaxes(autorange="reversed")
+        fig.update_layout(
+            height=max(450, len(result['name_list']) * 90),
+            xaxis_title="Дата и время",
+            yaxis_title="Операция",
+            legend_title="Тип",
+            hoverlabel=dict(bgcolor="white", font_size=13)
         )
-
-    )
-
-    fig.add_vline(
-
-        x=finish_dt,
-
-        line_width=2,
-
-        line_dash="dash",
-
-        line_color="red"
-
-    )
-
-    fig.add_annotation(
-
-        x=finish_dt,
-
-        y=1,
-
-        yref="paper",
-
-        text=f"Конец заказа<br>{result['T']:.2f} ч",
-
-        showarrow=False,
-
-        bgcolor="white"
-
-    )
-
-    st.plotly_chart(
-
-        fig,
-
-        use_container_width=True
-
-    )
-
-else:
-
-    st.info("Нет данных для построения диаграммы")
+        fig.update_xaxes(
+            showgrid=True,
+            tickformat="%d.%m %H:%M",
+            rangeslider_visible=True
+        )
+        finish_dt = base_dt + timedelta(hours=result['T'])
+        fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
+        fig.add_annotation(
+            x=finish_dt,
+            y=1,
+            yref="paper",
+            text=f"Конец заказа<br>{result['T']:.2f} ч",
+            showarrow=False,
+            bgcolor="white"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Нет данных для построения диаграммы")
 
     # ================== Экспорт в Excel ==================
     st.subheader("💾 Экспорт")

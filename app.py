@@ -74,7 +74,8 @@ def calculate(data, Q, N, correction_choice):
     # ---- Блок для клея (общий вес и канистры) ----
     can_count_4kg = 0
     can_count_1kg = 0
-    remainder_grams = 0.0
+    shortage_4kg = 0.0
+    shortage_1kg = 0.0
     total_weight = 0.0
     weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
     corrected = False
@@ -82,20 +83,20 @@ def calculate(data, Q, N, correction_choice):
     if is_glue:
         total_weight = sum(cnt * weight_map.get(g, 0) for g, cnt in gram_counts.items())
         can_weight_4kg = 4000.0
-        # Количество 4-кг канистр (округление вверх)
+        # 4-кг канистры
         can_count_4kg = math.ceil(total_weight / can_weight_4kg)
-        # Остаток (недостаток) в последней канистре
-        remainder = total_weight % can_weight_4kg
-        if remainder == 0:
-            remainder_grams = 0.0
-        else:
-            remainder_grams = can_weight_4kg - remainder
-        # Эквивалент в 1-кг канистрах (округление вверх)
-        can_count_1kg = math.ceil(total_weight / 1000.0)
+        rem4 = total_weight % can_weight_4kg
+        shortage_4kg = 0.0 if rem4 == 0 else can_weight_4kg - rem4
 
-        # Если пользователь выбрал корректировку, добавляем дозы, чтобы остаток стал 0
-        if remainder != 0 and correction_choice:
-            need_weight = remainder  # столько граммов не хватает
+        # 1-кг канистры
+        can_count_1kg = math.ceil(total_weight / 1000.0)
+        rem1 = total_weight % 1000.0
+        shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
+
+        # Корректировка до полных 4-кг канистр
+        if rem4 != 0 and correction_choice:
+            need_weight = shortage_4kg  # недостающие граммы
+            # выбираем самую тяжёлую дозу
             max_g = max(gram_counts.keys(), key=lambda g: weight_map.get(g, 0))
             dose_weight = weight_map[max_g]
             add_doses = math.ceil(need_weight / dose_weight)
@@ -103,11 +104,13 @@ def calculate(data, Q, N, correction_choice):
             total_weight += add_doses * dose_weight
             corrected = True
             Q = sum(gram_counts.values())
-            # Пересчитываем канистры и остаток
+            # пересчёт канистр и остатков
             can_count_4kg = math.ceil(total_weight / can_weight_4kg)
-            remainder = total_weight % can_weight_4kg
-            remainder_grams = 0.0 if remainder == 0 else can_weight_4kg - remainder
+            rem4 = total_weight % can_weight_4kg
+            shortage_4kg = 0.0 if rem4 == 0 else can_weight_4kg - rem4
             can_count_1kg = math.ceil(total_weight / 1000.0)
+            rem1 = total_weight % 1000.0
+            shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
 
     # ---- Основные расчёты по операциям ----
     for op in operations:
@@ -249,8 +252,9 @@ def calculate(data, Q, N, correction_choice):
         'operations': operations,
         'is_glue': is_glue,
         'can_count_4kg': can_count_4kg,
+        'shortage_4kg': shortage_4kg,
         'can_count_1kg': can_count_1kg,
-        'remainder_grams': remainder_grams,
+        'shortage_1kg': shortage_1kg,
         'total_weight': total_weight,
         'gram_counts': gram_counts,
         'corrected': corrected
@@ -292,9 +296,9 @@ with st.sidebar:
         st.info(f"Общий заказ: {Q} шт")
 
         st.session_state.correction_choice = st.checkbox(
-            "Корректировать заказ до полных канистр (увеличить)",
+            "Корректировать заказ до полных 4-кг канистр (увеличить)",
             value=st.session_state.correction_choice,
-            help="Если остаток не равен нулю, добавим недостающие дозы к самой крупной граммовке"
+            help="Если есть недостаток в последней 4-кг канистре, добавим недостающие дозы к самой крупной граммовке"
         )
     else:
         Q = st.number_input("Количество штук в заказе", min_value=1, value=1200, step=100, key='q_input')
@@ -363,7 +367,7 @@ if st.session_state.result is not None:
     st.success("✅ Расчёт завершён!")
 
     if result['is_glue'] and result['corrected']:
-        st.info(f"📝 Заказ скорректирован до полных канистр. Новое количество: {result['Q']} шт. Общий вес: {result['total_weight']:.2f} г.")
+        st.info(f"📝 Заказ скорректирован до полных 4-кг канистр. Новое количество: {result['Q']} шт. Общий вес: {result['total_weight']:.2f} г.")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📦 Заказ", f"{result['Q']} шт")
@@ -372,14 +376,19 @@ if st.session_state.result is not None:
     col4.metric("📅 Рабочих дней", result['days_needed'])
 
     if result['is_glue']:
-        c1, c2, c3, c4 = st.columns(4)
+        # 5 колонок для информации о канистрах
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
-        c2.metric("📦 Необходимо канистр 4 кг", result['can_count_4kg'])
-        if result['remainder_grams'] > 0:
-            c3.metric("⚠️ Недостаток в последней канистре", f"{result['remainder_grams']:.2f} г")
+        c2.metric("📦 4-кг канистр (всего)", result['can_count_4kg'])
+        if result['shortage_4kg'] > 0:
+            c3.metric("⚠️ Недостаток 4-кг", f"{result['shortage_4kg']:.2f} г")
         else:
-            c3.metric("✅ Остаток", "0 г (всё кратно)")
-        c4.metric("📦 Эквивалент в 1 кг канистрах", result['can_count_1kg'])
+            c3.metric("✅ 4-кг", "кратно")
+        c4.metric("📦 1-кг канистр (всего)", result['can_count_1kg'])
+        if result['shortage_1kg'] > 0:
+            c5.metric("⚠️ Недостаток 1-кг", f"{result['shortage_1kg']:.2f} г")
+        else:
+            c5.metric("✅ 1-кг", "кратно")
 
     st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
     st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
@@ -450,11 +459,12 @@ if st.session_state.result is not None:
         ws1.append(["Трудоёмкость (чел·ч)", result['total_labor']])
         if result['is_glue']:
             ws1.append(["Общий вес (г)", result['total_weight']])
-            ws1.append(["Необходимо канистр 4 кг", result['can_count_4kg']])
-            ws1.append(["Недостаток в последней канистре (г)", result['remainder_grams']])
-            ws1.append(["Эквивалент в 1 кг канистрах", result['can_count_1kg']])
+            ws1.append(["Необходимо 4-кг канистр", result['can_count_4kg']])
+            ws1.append(["Недостаток в последней 4-кг канистре (г)", result['shortage_4kg']])
+            ws1.append(["Необходимо 1-кг канистр", result['can_count_1kg']])
+            ws1.append(["Недостаток в последней 1-кг канистре (г)", result['shortage_1kg']])
             if result['corrected']:
-                ws1.append(["Корректировка", "Выполнена (увеличено до полных канистр)"])
+                ws1.append(["Корректировка", "Выполнена (увеличено до полных 4-кг канистр)"])
 
         ws2 = wb.create_sheet("Операции")
         ws2.append(["Операция", "t_i (ч)", "Наладка (ч)", "Людей", "Общее время (ч)", "Дней работы"])

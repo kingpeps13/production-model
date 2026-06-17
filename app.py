@@ -46,7 +46,7 @@ def template_to_json():
         "shift_duration": st.session_state.shift_duration,
         "is_glue": st.session_state.is_glue,
         "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
-        "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
+        "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},   # ← добавляем
         "operations": st.session_state.operations,
         "version": "1.2.0"
     }
@@ -59,7 +59,7 @@ def load_template_from_json(json_str):
     st.session_state.shift_duration = data.get('shift_duration', 9.0)
     st.session_state.is_glue = data.get('is_glue', False)
     st.session_state.grammovki = data.get('grammovki', [3, 5])
-    st.session_state.gram_counts = data.get('gram_counts', {3: 500, 5: 700})
+    st.session_state.gram_counts = data.get('gram_counts', {3: 500, 5: 700})   # ← добавляем
     st.session_state.operations = data.get('operations', [])
     st.session_state.result = None
     st.rerun()

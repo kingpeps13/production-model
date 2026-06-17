@@ -54,7 +54,6 @@ def load_template_from_json(json_str):
     st.session_state.is_glue = data.get('is_glue', False)
     st.session_state.grammovki = data.get('grammovki', [3, 5])
     st.session_state.operations = data.get('operations', [])
-    # Сбрасываем результат
     st.session_state.result = None
     st.rerun()
 
@@ -67,23 +66,25 @@ def calculate(data, Q, N):
     is_glue = data.get('is_glue', False)
     hours_per_day = shift_duration
 
-    # ---- Подготовка (клей) ----
-    warnings = []
-    choice_correct = False
+    # ---- Блок для клея (общий вес и канистры) ----
     can_count = 0
     remainder_grams = 0.0
-    total_weight_display = 0.0
-    parts = {}
+    total_weight = 0.0
+    can_weight = 4000.0  # грамм в канистре
+    weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
+    gram_counts = data.get('gram_counts', {})  # передаём из сессии
 
     if is_glue:
-        grammovki = data.get('grammovki', [])
-        weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
-        # здесь нужно получить количества из st.session_state.gram_counts
-        # но мы их передадим через Q – сумма уже посчитана
-        # для деталей оставим пока заглушку
-        pass
+        # Вычисляем общий вес
+        total_weight = 0.0
+        for g, cnt in gram_counts.items():
+            total_weight += cnt * weight_map.get(g, 0)
+        # Количество полных канистр и остаток
+        can_count = int(total_weight // can_weight)
+        remainder_grams = total_weight % can_weight
+        # Если остаток есть, можно предложить корректировку, но пока просто покажем
 
-    # Установка дефолтов
+    # ---- Основные расчёты по операциям ----
     for op in operations:
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
@@ -220,7 +221,12 @@ def calculate(data, Q, N):
         'shift_start': shift_start,
         'hours_per_day': hours_per_day,
         'product_name': product_name,
-        'operations': operations
+        'operations': operations,
+        'is_glue': is_glue,
+        'can_count': can_count,
+        'remainder_grams': remainder_grams,
+        'total_weight': total_weight,
+        'gram_counts': gram_counts
     }
 
 # ================== Боковая панель ==================
@@ -304,6 +310,7 @@ with st.sidebar:
             "shift_duration": st.session_state.shift_duration,
             "is_glue": st.session_state.is_glue,
             "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
+            "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
             "operations": st.session_state.operations
         }
         if st.session_state.is_glue:
@@ -327,6 +334,16 @@ if st.session_state.result is not None:
     col2.metric("📋 Нарядов", result['m'])
     col3.metric("⏱️ Календарное время", f"{result['T']:.2f} ч")
     col4.metric("📅 Рабочих дней", result['days_needed'])
+
+    # Метрики для клея
+    if result['is_glue']:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
+        c2.metric("📦 Полных канистр (4 кг)", result['can_count'])
+        if result['remainder_grams'] > 0:
+            c3.metric("⚠️ Остаток в неполной канистре", f"{result['remainder_grams']:.2f} г")
+        else:
+            c3.metric("✅ Остаток", "0 г (всё кратно)")
 
     st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
     st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
@@ -360,7 +377,7 @@ if st.session_state.result is not None:
 
     # Диаграмма Ганта
     st.subheader("📈 Диаграмма Ганта")
-        if result['all_intervals']:
+    if result['all_intervals']:
         try:
             df_gantt = []
             for start, end, label, _ in result['all_intervals']:
@@ -372,7 +389,6 @@ if st.session_state.result is not None:
                               color="Resource",
                               title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
                               color_discrete_sequence=px.colors.qualitative.Set3)
-            # Проверяем, что name_list существует и не пуст
             if result.get('name_list'):
                 fig.update_yaxis(categoryorder='array', categoryarray=result['name_list'])
             fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
@@ -398,6 +414,10 @@ if st.session_state.result is not None:
         ws1.append(["Календарное время (ч)", result['T']])
         ws1.append(["Рабочих дней", result['days_needed']])
         ws1.append(["Трудоёмкость (чел·ч)", result['total_labor']])
+        if result['is_glue']:
+            ws1.append(["Общий вес (г)", result['total_weight']])
+            ws1.append(["Полных канистр", result['can_count']])
+            ws1.append(["Остаток (г)", result['remainder_grams']])
 
         ws2 = wb.create_sheet("Операции")
         ws2.append(["Операция", "t_i (ч)", "Наладка (ч)", "Людей", "Общее время (ч)", "Дней работы"])

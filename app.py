@@ -34,6 +34,8 @@ if 'result' not in st.session_state:
     st.session_state.result = None
 if 'template_name' not in st.session_state:
     st.session_state.template_name = "template"
+if 'correction_choice' not in st.session_state:
+    st.session_state.correction_choice = False
 
 # ================== Функции шаблонов ==================
 def template_to_json():
@@ -57,36 +59,47 @@ def load_template_from_json(json_str):
     st.session_state.grammovki = data.get('grammovki', [3, 5])
     st.session_state.operations = data.get('operations', [])
     st.session_state.result = None
+    # Принудительно обновляем интерфейс
     st.rerun()
 
 # ================== Функция расчёта ==================
-def calculate(data, Q, N):
+def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
     shift_start = data.get('shift_start', 8.0)
     shift_duration = data.get('shift_duration', 9.0)
     operations = data['operations']
     is_glue = data.get('is_glue', False)
     hours_per_day = shift_duration
+    gram_counts = data.get('gram_counts', {})
 
     # ---- Блок для клея (общий вес и канистры) ----
     can_count_4kg = 0
     can_count_1kg = 0
     remainder_grams = 0.0
     total_weight = 0.0
-    can_weight_4kg = 4000.0
-    can_weight_1kg = 1000.0
     weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
-    gram_counts = data.get('gram_counts', {})
+    corrected = False
 
     if is_glue:
-        total_weight = 0.0
-        for g, cnt in gram_counts.items():
-            total_weight += cnt * weight_map.get(g, 0)
-        can_count_4kg = int(total_weight // can_weight_4kg)
+        total_weight = sum(cnt * weight_map.get(g, 0) for g, cnt in gram_counts.items())
+        can_weight_4kg = 4000.0
         remainder_grams = total_weight % can_weight_4kg
-        # Количество 1-кг канистр (округляем вверх общий вес в кг)
-        total_kg = total_weight / 1000.0
-        can_count_1kg = math.ceil(total_kg)
+
+        # Если остаток есть и пользователь выбрал корректировку
+        if remainder_grams != 0 and correction_choice:
+            need_weight = can_weight_4kg - remainder_grams
+            # Выбираем граммовку с наибольшим весом дозы
+            max_g = max(gram_counts.keys(), key=lambda g: weight_map.get(g, 0))
+            dose_weight = weight_map[max_g]
+            add_doses = math.ceil(need_weight / dose_weight)
+            gram_counts[max_g] += add_doses
+            total_weight += add_doses * dose_weight
+            remainder_grams = total_weight % can_weight_4kg
+            corrected = True
+            Q = sum(gram_counts.values())
+
+        can_count_4kg = int(total_weight // can_weight_4kg)
+        can_count_1kg = math.ceil(total_weight / 1000.0)
 
     # ---- Основные расчёты по операциям ----
     for op in operations:
@@ -231,7 +244,9 @@ def calculate(data, Q, N):
         'can_count_1kg': can_count_1kg,
         'remainder_grams': remainder_grams,
         'total_weight': total_weight,
-        'gram_counts': gram_counts
+        'gram_counts': gram_counts,
+        'corrected': corrected,
+        'original_weight': data.get('original_weight', total_weight)  # не используется, но можно передать
     }
 
 # ================== Боковая панель ==================
@@ -268,8 +283,16 @@ with st.sidebar:
             total_q += cnt
         Q = total_q
         st.info(f"Общий заказ: {Q} шт")
+
+        # Чекбокс для корректировки
+        st.session_state.correction_choice = st.checkbox(
+            "Корректировать заказ до целых канистр (увеличить)",
+            value=st.session_state.correction_choice,
+            help="Если остаток в канистре не равен нулю, добавим недостающие дозы к самой крупной граммовке"
+        )
     else:
         Q = st.number_input("Количество штук в заказе", min_value=1, value=1200, step=100, key='q_input')
+        st.session_state.correction_choice = False
 
     N = st.number_input("Размер наряда (передаточной партии)", min_value=1, value=600, step=100, key='n_input')
 
@@ -295,7 +318,6 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    # Поле для имени шаблона
     template_name = st.text_input("Имя шаблона для сохранения", value=st.session_state.template_name, key='template_name_input')
     st.session_state.template_name = template_name if template_name else "template"
     json_data = template_to_json()
@@ -315,16 +337,18 @@ with st.sidebar:
             "is_glue": st.session_state.is_glue,
             "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
             "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
-            "operations": st.session_state.operations
+            "operations": st.session_state.operations,
+            "original_weight": 0.0  # не используется, но можно добавить
         }
         if st.session_state.is_glue:
             Q = sum(st.session_state.gram_counts.values())
         else:
             Q = st.session_state.get('q_input', 1200)
         N = st.session_state.get('n_input', 600)
+        correction = st.session_state.correction_choice if st.session_state.is_glue else False
 
         with st.spinner("Выполняется расчёт..."):
-            result = calculate(data, Q, N)
+            result = calculate(data, Q, N, correction)
         st.session_state.result = result
         st.rerun()
 
@@ -332,6 +356,10 @@ with st.sidebar:
 if st.session_state.result is not None:
     result = st.session_state.result
     st.success("✅ Расчёт завершён!")
+
+    # Вывод информации о корректировке, если она была
+    if result['is_glue'] and result['corrected']:
+        st.info(f"📝 Заказ скорректирован до целых канистр. Новое количество: {result['Q']} шт. Общий вес: {result['total_weight']:.2f} г.")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📦 Заказ", f"{result['Q']} шт")
@@ -352,6 +380,7 @@ if st.session_state.result is not None:
     st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
     st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
 
+    # Таблица операций
     st.subheader("📊 Детализация по операциям")
     df_ops = pd.DataFrame({
         "Операция": result['name_list'],
@@ -365,6 +394,7 @@ if st.session_state.result is not None:
     })
     st.dataframe(df_ops, use_container_width=True)
 
+    # Загрузка по дням
     st.subheader("📅 Загрузка по дням")
     if result['day_usage_dict']:
         df_days = pd.DataFrame()
@@ -377,7 +407,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ИСПРАВЛЕННАЯ ДИАГРАММА ГАНТА ==================
+    # ================== Диаграмма Ганта (пока оставляем текущую) ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         try:
@@ -388,7 +418,6 @@ if st.session_state.result is not None:
                 end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
                 df_gantt.append(dict(Task=op_name, Start=start_dt, Finish=end_dt, Resource=label))
             df_gantt = pd.DataFrame(df_gantt)
-            # Явно задаём порядок операций на оси Y
             fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
                               color="Resource",
                               title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
@@ -422,6 +451,8 @@ if st.session_state.result is not None:
             ws1.append(["Канистр 4 кг", result['can_count_4kg']])
             ws1.append(["Канистр 1 кг (эквивалент)", result['can_count_1kg']])
             ws1.append(["Остаток (г)", result['remainder_grams']])
+            if result['corrected']:
+                ws1.append(["Корректировка", "Выполнена (увеличено до целых канистр)"])
 
         ws2 = wb.create_sheet("Операции")
         ws2.append(["Операция", "t_i (ч)", "Наладка (ч)", "Людей", "Общее время (ч)", "Дней работы"])

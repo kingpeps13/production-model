@@ -417,7 +417,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ДИАГРАММА ГАНТА (Plotly) ==================
+    # ================== ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         rows = []
@@ -426,50 +426,81 @@ if st.session_state.result is not None:
         base_dt = datetime(2026, 1, 1, shift_hour, shift_min)
 
         for start, end, label, color in result['all_intervals']:
+            # Определяем операцию и тип
             if label.startswith("Наладка"):
                 operation = label.replace("Наладка ", "")
                 work_type = "Наладка"
+                group = "Наладка"          # для цвета
+                naryad = None
             else:
-                operation = label.split(" (")[0]
+                # Формат: "Розлив (нар.1)" или "Розлив (нар.2)"
+                parts = label.split(" (")
+                operation = parts[0]
                 work_type = "Работа"
+                group = operation
+                # извлекаем номер наряда
+                if len(parts) > 1:
+                    naryad = parts[1].replace(")", "").replace("нар.", "").strip()
+                else:
+                    naryad = None
 
             rows.append({
                 "Операция": operation,
                 "Начало": base_dt + timedelta(hours=start),
                 "Окончание": base_dt + timedelta(hours=end),
+                "Группа": group,
+                "Тип": work_type,
+                "Наряд": naryad,
                 "Описание": label,
-                "Тип": work_type
+                "Длительность (ч)": round(end - start, 2)
             })
 
         df_gantt = pd.DataFrame(rows)
+
+        # Создаём словарь цветов: для наладки серый, для операций – из палитры
+        unique_ops = result['name_list']
+        colors_palette = px.colors.qualitative.Plotly
+        op_colors = {op: colors_palette[i % len(colors_palette)] for i, op in enumerate(unique_ops)}
+        op_colors["Наладка"] = "gray"
+
         fig = px.timeline(
             df_gantt,
             x_start="Начало",
             x_end="Окончание",
             y="Операция",
-            color="Тип",
+            color="Группа",
+            color_discrete_map=op_colors,
             hover_name="Описание",
             hover_data={
                 "Начало": True,
                 "Окончание": True,
                 "Тип": True,
+                "Наряд": True,
+                "Длительность (ч)": True,
                 "Операция": False,
-                "Описание": False
-            }
+                "Группа": False,
+                "Описание": False,
+            },
+            title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+            labels={"Операция": "Операция"}
         )
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(
-            height=max(450, len(result['name_list']) * 90),
-            xaxis_title="Дата и время",
-            yaxis_title="Операция",
-            legend_title="Тип",
-            hoverlabel=dict(bgcolor="white", font_size=13)
+
+        # Устанавливаем порядок операций на оси Y (сверху вниз – как в списке)
+        fig.update_yaxes(
+            autorange="reversed",
+            categoryorder='array',
+            categoryarray=result['name_list']
         )
+
+        # Настройка оси X (дата и время)
         fig.update_xaxes(
             showgrid=True,
             tickformat="%d.%m %H:%M",
-            rangeslider_visible=True
+            rangeslider_visible=True,
+            title_text="Дата и время"
         )
+
+        # Вертикальная красная линия окончания заказа
         finish_dt = base_dt + timedelta(hours=result['T'])
         fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
         fig.add_annotation(
@@ -478,8 +509,19 @@ if st.session_state.result is not None:
             yref="paper",
             text=f"Конец заказа<br>{result['T']:.2f} ч",
             showarrow=False,
-            bgcolor="white"
+            bgcolor="white",
+            font=dict(size=12)
         )
+
+        # Дополнительные настройки внешнего вида
+        fig.update_layout(
+            height=max(450, len(result['name_list']) * 90),
+            xaxis_title="Дата и время",
+            yaxis_title="Операция",
+            legend_title="Группа",
+            hoverlabel=dict(bgcolor="white", font_size=13)
+        )
+
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Нет данных для построения диаграммы")

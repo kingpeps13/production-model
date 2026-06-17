@@ -62,6 +62,7 @@ def load_template_from_json(json_str):
 # ================== Расчёт ==================
 def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
+    shift_start = data.get('shift_start', 8.0)
     hours_per_day = data.get('shift_duration', 9.0)
     operations = data['operations']
     is_glue = data.get('is_glue', False)
@@ -181,8 +182,8 @@ def calculate(data, Q, N, correction_choice):
         day_end = day_start + hours_per_day
         day_usage = {op: round(sum(min(e, day_end) - max(s, day_start)
                                    for s, e in op_intervals[i] if s < day_end and e > day_start), 2)
-                     for i, op in enumerate(name_list) if any(s < day_end and e > day_start for s, e in op_intervals[i])}
-        day_usage_dict[day] = day_usage
+                     for i, op in enumerate(name_list)}
+        day_usage_dict[day] = {k: v for k, v in day_usage.items() if v > 0}
 
     return {
         'Q': Q, 'N': N, 'm': m, 'T': round(T, 2), 'days_needed': days_needed,
@@ -194,10 +195,12 @@ def calculate(data, Q, N, correction_choice):
         'product_name': product_name, 'is_glue': is_glue, 'corrected': corrected,
         'gram_counts': gram_counts, 'total_weight': round(total_weight, 2),
         'can_count_4kg': can_count_4kg, 'shortage_4kg': round(shortage_4kg, 2),
-        'can_count_1kg': can_count_1kg, 'shortage_1kg': round(shortage_1kg, 2)
+        'can_count_1kg': can_count_1kg, 'shortage_1kg': round(shortage_1kg, 2),
+        'shift_start': shift_start,          # ← ФИКС ОШИБКИ
+        'shift_duration': hours_per_day
     }
 
-# ================== Боковая панель ==================
+# ================== Боковая панель (без изменений) ==================
 with st.sidebar:
     st.header("📋 Параметры заказа")
     uploaded_file = st.file_uploader("Загрузить шаблон (JSON)", type=["json"])
@@ -290,7 +293,7 @@ if st.session_state.result:
     col4.metric("📅 Дней", r['days_needed'])
 
     if r['is_glue']:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         c1.metric("🧴 Вес", f"{r['total_weight']:.1f} г")
         c2.metric("4-кг канистр", r['can_count_4kg'])
         c3.metric("1-кг канистр", r['can_count_1kg'])
@@ -308,7 +311,6 @@ if st.session_state.result:
     })
     st.dataframe(df_ops, use_container_width=True)
 
-    # === Загрузка по дням ===
     st.subheader("📅 Загрузка по дням")
     if r['day_usage_dict']:
         df_days = pd.DataFrame([{"День": d+1, **usage} for d, usage in r['day_usage_dict'].items()])
@@ -317,13 +319,12 @@ if st.session_state.result:
     # === Gantt-диаграмма ===
     st.subheader("📈 Диаграмма Ганта")
     if r['all_intervals']:
-        shift_hour = int(r['shift_start'] // 1)
+        shift_hour = int(r['shift_start'] // 1)          # ← теперь безопасно
         shift_min = int((r['shift_start'] % 1) * 60)
         base_dt = datetime(2026, 1, 1, shift_hour, shift_min)
 
         fig = go.Figure()
         op_list = r['name_list']
-        colors = px.colors.qualitative.Plotly
 
         for start, end, label, color in r['all_intervals']:
             if end <= start: continue
@@ -331,18 +332,15 @@ if st.session_state.result:
             end_dt = base_dt + timedelta(hours=end)
             duration = end - start
 
+            y_label = label.split(" (нар.")[0] if " (нар." in label else label.replace("Наладка ", "")
+
             fig.add_trace(go.Bar(
                 x=[start_dt],
-                y=[label.split(" (")[0] if " (нар." in label else label.replace("Наладка ", "")],
+                y=[y_label],
                 orientation='h',
-                width=[duration * 3600000],  # ms
+                width=[duration * 3600000],
                 marker_color=color,
-                hovertemplate=(
-                    f"<b>{label}</b><br>"
-                    f"Начало: {start_dt.strftime('%d.%m %H:%M')}<br>"
-                    f"Окончание: {end_dt.strftime('%d.%m %H:%M')}<br>"
-                    f"Длительность: {duration:.2f} ч<extra></extra>"
-                ),
+                hovertemplate=f"<b>{label}</b><br>Начало: {start_dt.strftime('%d.%m %H:%M')}<br>Окончание: {end_dt.strftime('%d.%m %H:%M')}<br>Длительность: {duration:.2f} ч<extra></extra>",
                 showlegend=False
             ))
 
@@ -351,40 +349,38 @@ if st.session_state.result:
         fig.add_vline(x=base_dt + timedelta(hours=r['T']), line_dash="dash", line_color="red")
 
         fig.update_layout(
-            height=max(500, len(op_list) * 80),
+            height=max(500, len(op_list) * 85),
             title=f"Диаграмма Ганта — {r['product_name']} ({r['Q']} шт)",
             barmode='overlay',
             bargap=0.1
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # === Экспорт в Excel ===
+    # === Excel ===
     st.subheader("💾 Экспорт")
     try:
         wb = Workbook()
         wb.remove(wb.active)
-
-        # Параметры
         ws1 = wb.create_sheet("Параметры")
         ws1.append(["Параметр", "Значение"])
-        for param, val in [
+        params = [
             ("Продукт", r['product_name']),
             ("Количество", r['Q']),
             ("Нарядов", r['m']),
             ("Календарное время (ч)", r['T']),
             ("Рабочих дней", r['days_needed']),
-            ("Трудоёмкость (чел·ч)", r['total_labor']),
-        ]:
-            ws1.append([param, val])
+            ("Трудоёмкость (чел·ч)", r['total_labor'])
+        ]
+        for p in params:
+            ws1.append(p)
 
         if r['is_glue']:
             ws1.append(["Общий вес (г)", r['total_weight']])
             ws1.append(["4-кг канистр", r['can_count_4kg']])
             ws1.append(["1-кг канистр", r['can_count_1kg']])
 
-        # Операции
         ws2 = wb.create_sheet("Операции")
-        ws2.append(["Операция", "Время на наряд (ч)", "Наладка (ч)", "Людей", "Дней работы", "Трудоёмкость"])
+        ws2.append(["Операция", "Время на наряд", "Наладка", "Людей", "Дней работы", "Трудоёмкость"])
         for i, name in enumerate(r['name_list']):
             ws2.append([name, r['t_list'][i], r['setup_list'][i], r['people_list'][i],
                        r['days_work_list'][i], [lab[1] for lab in r['labor_details']][i]])
@@ -394,12 +390,13 @@ if st.session_state.result:
         buffer.seek(0)
 
         st.download_button(
-            label="📥 Скачать Excel-отчёт",
+            "📥 Скачать Excel-отчёт",
             data=buffer,
             file_name=f"Расчёт_{r['product_name'].replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     except Exception as e:
-        st.error(f"Ошибка экспорта: {e}")
+        st.error(f"Ошибка экспорта Excel: {e}")
+
 else:
-    st.info("Настройте параметры и нажмите «Рассчитать» или включите авторасчёт")
+    st.info("Настройте параметры слева и включите авторасчёт или нажмите кнопку")

@@ -11,65 +11,83 @@ from openpyxl import Workbook
 st.set_page_config(page_title="Модель расчёта производства", layout="wide")
 st.title("🏭 Модель расчёта календарного времени выполнения заказа")
 
-# ================== Инициализация сессии (все поля пустые по умолчанию) ==================
-if 'operations' not in st.session_state:
-    st.session_state.operations = []  # пустой список операций
-if 'grammovki' not in st.session_state:
-    st.session_state.grammovki = []
-if 'gram_counts' not in st.session_state:
-    st.session_state.gram_counts = {}
-if 'product_name' not in st.session_state:
-    st.session_state.product_name = ""
-if 'shift_start' not in st.session_state:
-    st.session_state.shift_start = 8.0
-if 'shift_duration' not in st.session_state:
-    st.session_state.shift_duration = 9.0
-if 'is_glue' not in st.session_state:
-    st.session_state.is_glue = False
-if 'result' not in st.session_state:
-    st.session_state.result = None
-if 'template_name' not in st.session_state:
-    st.session_state.template_name = "template"
-if 'correction_choice' not in st.session_state:
-    st.session_state.correction_choice = False
+# ================== Инициализация сессии ==================
+# Все параметры хранятся в session_state по ключам, соответствующим виджетам
+defaults = {
+    "operations": [],
+    "grammovki": [],
+    "gram_counts": {},
+    "product_name": "",
+    "shift_start": 8.0,
+    "shift_duration": 9.0,
+    "is_glue": False,
+    "result": None,
+    "template_name": "template",
+    "correction_choice": False,
+    # Ключи виджетов
+    "pn_input": "",
+    "ss_input": 8.0,
+    "sd_input": 9.0,
+    "ig_input": False,
+    "gs_input": [],
+    "q_input": 1200,
+    "n_input": 600,
+    "template_name_input": "template"
+}
+for key, default in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # ================== Функции шаблонов ==================
 def template_to_json():
     data = {
-        "product_name": st.session_state.product_name,
-        "shift_start": st.session_state.shift_start,
-        "shift_duration": st.session_state.shift_duration,
-        "is_glue": st.session_state.is_glue,
-        "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
-        "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
+        "product_name": st.session_state.pn_input,
+        "shift_start": st.session_state.ss_input,
+        "shift_duration": st.session_state.sd_input,
+        "is_glue": st.session_state.ig_input,
+        "grammovki": st.session_state.gs_input if st.session_state.ig_input else [],
+        "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
-        "version": "1.2.0"
+        "version": "1.3.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 def load_template_from_json(json_str):
     data = json.loads(json_str)
-    st.session_state.product_name = data.get('product_name', "")
-    st.session_state.shift_start = data.get('shift_start', 8.0)
-    st.session_state.shift_duration = data.get('shift_duration', 9.0)
-    st.session_state.is_glue = data.get('is_glue', False)
-    st.session_state.grammovki = data.get('grammovki', [])
-    st.session_state.gram_counts = data.get('gram_counts', {})
+    # Обновляем ключи виджетов
+    st.session_state.pn_input = data.get('product_name', "")
+    st.session_state.ss_input = data.get('shift_start', 8.0)
+    st.session_state.sd_input = data.get('shift_duration', 9.0)
+    st.session_state.ig_input = data.get('is_glue', False)
+    st.session_state.gs_input = data.get('grammovki', [])
+    # Обновляем количества для граммовок
+    gram_counts = data.get('gram_counts', {})
+    for g in [3,5,10]:
+        st.session_state[f"g_{g}"] = gram_counts.get(g, 0)
     st.session_state.operations = data.get('operations', [])
     st.session_state.result = None
     st.rerun()
 
 def clear_all():
-    """Сбрасывает все параметры на начальные (пустые)"""
+    """Сбрасывает все параметры на начальные (пустые) и удаляет ключи виджетов"""
+    keys_to_clear = ['pn_input', 'ss_input', 'sd_input', 'ig_input', 'gs_input',
+                     'q_input', 'n_input', 'operations', 'result', 'correction_choice']
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    # Сбросить граммовки
+    for g in [3,5,10]:
+        if f"g_{g}" in st.session_state:
+            del st.session_state[f"g_{g}"]
+    # Установить значения по умолчанию
+    st.session_state.pn_input = ""
+    st.session_state.ss_input = 8.0
+    st.session_state.sd_input = 9.0
+    st.session_state.ig_input = False
+    st.session_state.gs_input = []
     st.session_state.operations = []
-    st.session_state.grammovki = []
-    st.session_state.gram_counts = {}
-    st.session_state.product_name = ""
-    st.session_state.shift_start = 8.0
-    st.session_state.shift_duration = 9.0
-    st.session_state.is_glue = False
-    st.session_state.correction_choice = False
     st.session_state.result = None
+    st.session_state.correction_choice = False
     st.rerun()
 
 # ================== Функция расчёта ==================
@@ -82,7 +100,7 @@ def calculate(data, Q, N, correction_choice):
     hours_per_day = shift_duration
     gram_counts = data.get('gram_counts', {}).copy()
 
-    # ---- Блок для клея ----
+    # ---- Клей ----
     can_count_4kg = 0
     can_count_1kg = 0
     shortage_4kg = 0.0
@@ -118,7 +136,7 @@ def calculate(data, Q, N, correction_choice):
             rem1 = total_weight % 1000.0
             shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
 
-    # ---- Основные расчёты ----
+    # ---- Операции ----
     for op in operations:
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
@@ -286,70 +304,73 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Основные параметры ---
-    st.session_state.product_name = st.text_input("Наименование продукта", value=st.session_state.product_name, key='pn_input')
-    st.session_state.shift_start = st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, value=st.session_state.shift_start, step=0.5, key='ss_input')
-    st.session_state.shift_duration = st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, value=st.session_state.shift_duration, step=0.5, key='sd_input')
-    st.session_state.is_glue = st.checkbox("Это клей?", value=st.session_state.is_glue, key='ig_input')
+    # --- Основные параметры (только key, без value) ---
+    st.text_input("Наименование продукта", key='pn_input')
+    st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, step=0.5, key='ss_input')
+    st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, step=0.5, key='sd_input')
+    st.checkbox("Это клей?", key='ig_input')
 
-    if st.session_state.is_glue:
+    # --- Граммовки клея ---
+    if st.session_state.ig_input:
         st.subheader("🧴 Граммовки клея")
         all_gram = [3, 5, 10]
-        selected = st.multiselect("Выберите граммовки", all_gram, default=st.session_state.grammovki, key='gs_input')
-        st.session_state.grammovki = selected
-        st.session_state.gram_counts = {}
-        total_q = 0
-        for g in selected:
-            default_cnt = st.session_state.gram_counts.get(g, 0)
-            cnt = st.number_input(f"Количество {g} мл", min_value=0, value=default_cnt, step=50, key=f"g_{g}")
-            st.session_state.gram_counts[g] = cnt
-            total_q += cnt
-        Q = total_q
-        st.info(f"Общий заказ: {Q} шт")
-        st.session_state.correction_choice = st.checkbox(
-            "Корректировать заказ до полных 4-кг канистр (увеличить)",
-            value=st.session_state.correction_choice,
-            help="Если есть недостаток в последней 4-кг канистре, добавим недостающие дозы к самой крупной граммовке"
-        )
+        st.multiselect("Выберите граммовки", all_gram, key='gs_input')
+        # Для каждой выбранной граммовки – поле ввода количества
+        for g in st.session_state.gs_input:
+            st.number_input(f"Количество {g} мл", min_value=0, step=50, key=f"g_{g}")
+        # Подсчёт общего заказа
+        total_q = sum(st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input)
+        st.info(f"Общий заказ: {total_q} шт")
+        st.checkbox("Корректировать заказ до полных 4-кг канистр (увеличить)", key='correction_choice')
     else:
-        Q = st.number_input("Количество штук в заказе", min_value=1, value=1200, step=100, key='q_input')
+        st.number_input("Количество штук в заказе", min_value=1, step=100, key='q_input')
         st.session_state.correction_choice = False
 
-    N = st.number_input("Размер наряда (передаточной партии)", min_value=1, value=600, step=100, key='n_input')
+    st.number_input("Размер наряда (передаточной партии)", min_value=1, step=50, key='n_input')
 
     st.divider()
 
     # --- Операции ---
     st.subheader("🔧 Операции")
+    # Перебираем операции из session_state.operations
     for i, op in enumerate(st.session_state.operations):
         with st.expander(f"Операция {i+1}: {op['name']}"):
-            op['name'] = st.text_input("Название", op['name'], key=f"name_{i}")
-            op['prod'] = st.number_input("Производительность (шт/ч)", min_value=0.1, value=op['prod'], key=f"prod_{i}")
-            op['setup'] = st.number_input("Наладка (ч)", min_value=0.0, value=op['setup'], key=f"setup_{i}")
-            op['equip'] = st.number_input("Оборудование", min_value=1, value=op['equip'], key=f"equip_{i}")
-            op['people'] = st.number_input("Человек", min_value=1, value=op['people'], key=f"people_{i}")
-            op['daily_setup'] = st.checkbox("Ежедневная наладка", value=op['daily_setup'], key=f"daily_{i}")
-            op['max_hours_per_day'] = st.number_input("Макс. часов в день", min_value=1.0, value=op['max_hours_per_day'], key=f"maxh_{i}")
+            st.text_input("Название", value=op['name'], key=f"name_{i}")
+            st.number_input("Производительность (шт/ч)", min_value=0.1, value=op['prod'], key=f"prod_{i}")
+            st.number_input("Наладка (ч)", min_value=0.0, step=0.05, value=op['setup'], key=f"setup_{i}")
+            st.number_input("Оборудование", min_value=1, step=1, value=op.get('equip', 1), key=f"equip_{i}")
+            st.number_input("Человек", min_value=1, step=1, value=op.get('people', 1), key=f"people_{i}")
+            st.checkbox("Ежедневная наладка", value=op.get('daily_setup', False), key=f"daily_{i}")
+            st.number_input("Макс. часов в день", min_value=1.0, step=0.5, value=op.get('max_hours_per_day', 8.0), key=f"maxh_{i}")
+            # Сохраняем изменения обратно в operations (это не обязательно, т.к. виджеты с key хранят значения отдельно)
+            # Но для чтения мы будем использовать session_state, а не op.
 
+    # Кнопки управления операциями
     col1, col2 = st.columns(2)
     if col1.button("➕ Добавить операцию"):
-        st.session_state.operations.append({"name": f"Операция {len(st.session_state.operations)+1}", "prod": 100.0, "setup": 0.0, "equip": 1, "people": 1, "daily_setup": False, "max_hours_per_day": 8.0})
+        new_op = {"name": f"Операция {len(st.session_state.operations)+1}", "prod": 100.0, "setup": 0.0, "equip": 1, "people": 1, "daily_setup": False, "max_hours_per_day": 8.0}
+        st.session_state.operations.append(new_op)
         st.rerun()
     if col2.button("🗑️ Удалить последнюю"):
         if len(st.session_state.operations) > 1:
             st.session_state.operations.pop()
             st.rerun()
+        else:
+            st.warning("Нельзя удалить последнюю операцию")
+
+    # Чтобы изменения в виджетах операций сохранялись в session_state.operations,
+    # нужно при каждом изменении обновлять список. Но проще после нажатия "Рассчитать"
+    # собрать данные из session_state. Сделаем это в кнопке расчёта.
 
     st.divider()
 
     # --- Сохранение шаблона ---
-    template_name = st.text_input("Имя шаблона для сохранения", value=st.session_state.template_name, key='template_name_input')
-    st.session_state.template_name = template_name if template_name else "template"
+    st.text_input("Имя шаблона для сохранения", key='template_name_input')
     json_data = template_to_json()
     st.download_button(
         label="💾 Скачать шаблон (JSON)",
         data=json_data,
-        file_name=f"{st.session_state.template_name}.json",
+        file_name=f"{st.session_state.template_name_input or 'template'}.json",
         mime="application/json"
     )
 
@@ -363,25 +384,44 @@ with st.sidebar:
 
     # --- Кнопка расчёта ---
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
+        # Собираем данные из session_state
+        # Операции: обновляем их на основе значений из виджетов
+        ops = []
+        for i in range(len(st.session_state.operations)):
+            op = {
+                "name": st.session_state.get(f"name_{i}", ""),
+                "prod": st.session_state.get(f"prod_{i}", 0.0),
+                "setup": st.session_state.get(f"setup_{i}", 0.0),
+                "equip": st.session_state.get(f"equip_{i}", 1),
+                "people": st.session_state.get(f"people_{i}", 1),
+                "daily_setup": st.session_state.get(f"daily_{i}", False),
+                "max_hours_per_day": st.session_state.get(f"maxh_{i}", 8.0)
+            }
+            ops.append(op)
+        st.session_state.operations = ops  # сохраняем обратно
+
         data = {
-            "product_name": st.session_state.product_name,
-            "shift_start": st.session_state.shift_start,
-            "shift_duration": st.session_state.shift_duration,
-            "is_glue": st.session_state.is_glue,
-            "grammovki": st.session_state.grammovki if st.session_state.is_glue else [],
-            "gram_counts": st.session_state.gram_counts if st.session_state.is_glue else {},
+            "product_name": st.session_state.pn_input,
+            "shift_start": st.session_state.ss_input,
+            "shift_duration": st.session_state.sd_input,
+            "is_glue": st.session_state.ig_input,
+            "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
             "operations": st.session_state.operations
         }
-        if st.session_state.is_glue:
-            Q = sum(st.session_state.gram_counts.values())
+        if st.session_state.ig_input:
+            Q = sum(st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input)
         else:
             Q = st.session_state.get('q_input', 1200)
         N = st.session_state.get('n_input', 600)
-        correction = st.session_state.correction_choice if st.session_state.is_glue else False
+        correction = st.session_state.correction_choice if st.session_state.ig_input else False
 
         with st.spinner("Выполняется расчёт..."):
             result = calculate(data, Q, N, correction)
         st.session_state.result = result
+        # Если была корректировка, обновляем gram_counts
+        if result.get('corrected'):
+            for g, cnt in result['gram_counts'].items():
+                st.session_state[f"g_{g}"] = cnt
         st.rerun()
 
 # ================== Отображение результатов ==================
@@ -440,35 +480,24 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ДИАГРАММА ГАНТА (с днями) ==================
+    # ================== ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         hours_per_day = result['hours_per_day']
 
-        # ---- Собираем данные по операциям и дням ----
         ops_dict = {}
         for start, end, label, color in result['all_intervals']:
             if end <= start:
                 continue
-            # Извлекаем операцию
             if label.startswith("Наладка"):
                 operation = label.replace("Наладка ", "").strip()
-                work_type = "Наладка"
-                naryad = None
             else:
                 if " (нар." in label:
-                    op_part, naryad_part = label.split(" (нар.")
-                    operation = op_part.strip()
-                    naryad = naryad_part.replace(")", "").strip()
+                    operation = label.split(" (нар.")[0].strip()
                 else:
                     operation = label.strip()
-                    naryad = None
-                work_type = "Работа"
-            # День (начиная с 0)
             day = int(start // hours_per_day)
-            # Время внутри дня (часы)
             start_in_day = start - day * hours_per_day
-            # Длительность в днях
             duration_days = (end - start) / hours_per_day
 
             if operation not in ops_dict:
@@ -478,15 +507,12 @@ if st.session_state.result is not None:
                 'start_in_day': start_in_day,
                 'duration_days': duration_days,
                 'color': color,
-                'typ': work_type,
-                'naryad': naryad,
                 'desc': label
             })
 
         if not ops_dict:
             st.warning("Нет данных для отображения")
         else:
-            # ---- Строим диаграмму ----
             fig = go.Figure()
             op_list = result['name_list']
             palette = px.colors.qualitative.Plotly
@@ -495,7 +521,6 @@ if st.session_state.result is not None:
 
             for op, segments in ops_dict.items():
                 for seg in segments:
-                    # X = день + доля дня (для точного позиционирования внутри дня)
                     x_start = seg['day'] + seg['start_in_day'] / hours_per_day
                     fig.add_trace(go.Bar(
                         x=[x_start],
@@ -505,18 +530,13 @@ if st.session_state.result is not None:
                         marker_color=seg['color'],
                         hovertemplate=(
                             f"<b>{seg['desc']}</b><br>"
-                            f"Операция: {op}<br>"
-                            f"Тип: {seg['typ']}<br>"
                             f"День: {seg['day']+1}<br>"
                             f"Начало в день: {seg['start_in_day']:.2f} ч<br>"
-                            f"Длительность: {seg['duration_days']:.2f} дн<br>"
-                            f"Наряд: {seg['naryad'] if seg['naryad'] else '-'}<br>"
-                            "<extra></extra>"
+                            f"Длительность: {seg['duration_days']:.2f} дн<extra></extra>"
                         ),
                         showlegend=False
                     ))
 
-            # ---- Оси ----
             fig.update_yaxes(
                 autorange="reversed",
                 categoryorder='array',
@@ -531,7 +551,6 @@ if st.session_state.result is not None:
                 showgrid=True
             )
 
-            # ---- Красная линия окончания заказа ----
             finish_day = result['T'] / hours_per_day
             fig.add_vline(x=finish_day, line_width=2, line_dash="dash", line_color="red")
             fig.add_annotation(
@@ -553,17 +572,6 @@ if st.session_state.result is not None:
             )
 
             st.plotly_chart(fig, use_container_width=True)
-
-            # ---- Отладка ----
-            with st.expander("🔍 Операции, найденные в данных"):
-                debug_data = []
-                for op, segs in ops_dict.items():
-                    debug_data.append({
-                        "Операция": op,
-                        "Количество сегментов": len(segs),
-                        "Пример метки": segs[0]['desc'] if segs else "-"
-                    })
-                st.dataframe(pd.DataFrame(debug_data))
     else:
         st.info("Нет данных для построения диаграммы")
 

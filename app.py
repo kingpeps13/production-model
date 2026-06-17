@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 import io
+import matplotlib
 from openpyxl import Workbook
 
 st.set_page_config(page_title="Модель расчёта производства", layout="wide")

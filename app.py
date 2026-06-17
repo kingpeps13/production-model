@@ -416,7 +416,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-     # ================== ДИАГРАММА ГАНТА (GO) ==================
+    # ================== ДИАГРАММА ГАНТА (исправленная) ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         import plotly.graph_objects as go
@@ -427,8 +427,8 @@ if st.session_state.result is not None:
         shift_min = int((result['shift_start'] % 1) * 60)
         base_dt = datetime(2026, 1, 1, shift_hour, shift_min)
 
-        # Собираем данные по операциям
-        ops_data = {}
+        # Собираем интервалы по операциям
+        ops_dict = {}
         for start, end, label, color in result['all_intervals']:
             if end <= start:
                 continue
@@ -436,7 +436,7 @@ if st.session_state.result is not None:
                 op_name = label.replace("Наладка ", "").strip()
                 typ = "Наладка"
                 naryad = None
-                description = label
+                desc = label
             else:
                 if " (нар." in label:
                     op_part, naryad_part = label.split(" (нар.")
@@ -446,97 +446,109 @@ if st.session_state.result is not None:
                     op_name = label.strip()
                     naryad = None
                 typ = "Работа"
-                description = label
+                desc = label
 
-            if op_name not in ops_data:
-                ops_data[op_name] = []
-            ops_data[op_name].append({
+            if op_name not in ops_dict:
+                ops_dict[op_name] = []
+            ops_dict[op_name].append({
                 'start': start,
                 'end': end,
                 'color': color,
                 'typ': typ,
                 'naryad': naryad,
-                'description': description
+                'desc': desc
             })
 
-        # ---- Строим диаграмму ----
-        fig = go.Figure()
-        # Цвета для операций
-        palette = px.colors.qualitative.Plotly
-        op_list = result['name_list']
-        op_colors = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
-        op_colors["Наладка"] = "gray"
+        # ---- Проверка: если пусто - выводим сообщение ----
+        if not ops_dict:
+            st.warning("Нет данных для отображения")
+        else:
+            # ---- Строим диаграмму через go.Bar ----
+            fig = go.Figure()
+            op_list = result['name_list']
+            palette = px.colors.qualitative.Plotly
+            op_colors = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
+            op_colors["Наладка"] = "gray"
 
-        # Добавляем по одной полосе для каждого сегмента
-        for op, segments in ops_data.items():
-            for seg in segments:
-                start_dt = base_dt + timedelta(hours=seg['start'])
-                end_dt = base_dt + timedelta(hours=seg['end'])
-                duration = seg['end'] - seg['start']
-                # Используем go.Bar с orientation='h'
-                fig.add_trace(go.Bar(
-                    x=[start_dt],
-                    y=[op],
-                    width=[duration * 3600000],  # длительность в миллисекундах для bar
-                    orientation='h',
-                    marker_color=seg['color'],
-                    hoverinfo='text',
-                    text=seg['description'],
-                    hovertemplate=(
-                        f"<b>{seg['description']}</b><br>"
-                        f"Операция: {op}<br>"
-                        f"Тип: {seg['typ']}<br>"
-                        f"Начало: {start_dt.strftime('%d.%m %H:%M')}<br>"
-                        f"Окончание: {end_dt.strftime('%d.%m %H:%M')}<br>"
-                        f"Длительность: {duration:.2f} ч<br>"
-                        f"Наряд: {seg['naryad'] if seg['naryad'] else '-'}<br>"
-                        "<extra></extra>"
-                    ),
-                    name=op,  # для легенды
-                    showlegend=False  # чтобы не плодить легенду
-                ))
+            for op, segments in ops_dict.items():
+                for seg in segments:
+                    start_dt = base_dt + timedelta(hours=seg['start'])
+                    end_dt = base_dt + timedelta(hours=seg['end'])
+                    duration = seg['end'] - seg['start']
 
-        # ---- Настройка осей ----
-        fig.update_yaxes(
-            autorange="reversed",
-            categoryorder='array',
-            categoryarray=op_list,
-            title_text="Операция"
-        )
-        fig.update_xaxes(
-            title_text="Дата и время",
-            tickformat="%d.%m %H:%M",
-            showgrid=True,
-            rangeslider_visible=True
-        )
+                    # Добавляем полосу через go.Bar
+                    fig.add_trace(go.Bar(
+                        x=[start_dt],
+                        y=[op],
+                        width=[duration * 3600000],  # миллисекунды
+                        orientation='h',
+                        marker_color=seg['color'],
+                        hoverinfo='text',
+                        text=seg['desc'],
+                        hovertemplate=(
+                            f"<b>{seg['desc']}</b><br>"
+                            f"Операция: {op}<br>"
+                            f"Тип: {seg['typ']}<br>"
+                            f"Начало: {start_dt.strftime('%d.%m %H:%M')}<br>"
+                            f"Окончание: {end_dt.strftime('%d.%m %H:%M')}<br>"
+                            f"Длительность: {duration:.2f} ч<br>"
+                            f"Наряд: {seg['naryad'] if seg['naryad'] else '-'}<br>"
+                            "<extra></extra>"
+                        ),
+                        name=op,
+                        showlegend=False
+                    ))
 
-        # ---- Красная линия окончания заказа ----
-        finish_dt = base_dt + timedelta(hours=result['T'])
-        fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
-        fig.add_annotation(
-            x=finish_dt,
-            y=1,
-            yref="paper",
-            text=f"Конец заказа<br>{result['T']:.2f} ч",
-            showarrow=False,
-            bgcolor="white",
-            font=dict(size=12)
-        )
+            # ---- Настройка осей ----
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder='array',
+                categoryarray=op_list,
+                title_text="Операция"
+            )
+            fig.update_xaxes(
+                title_text="Дата и время",
+                tickformat="%d.%m %H:%M",
+                showgrid=True,
+                rangeslider_visible=True,
+                tickangle=45
+            )
 
-        # ---- Общий вид ----
-        fig.update_layout(
-            height=max(450, len(op_list) * 90),
-            title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-            hoverlabel=dict(bgcolor="white", font_size=13),
-            barmode='overlay',  # чтобы полосы не суммировались, а располагались рядом
-            bargap=0.2
-        )
+            # ---- Красная линия окончания заказа ----
+            finish_dt = base_dt + timedelta(hours=result['T'])
+            fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
+            fig.add_annotation(
+                x=finish_dt,
+                y=1,
+                yref="paper",
+                text=f"Конец заказа<br>{result['T']:.2f} ч",
+                showarrow=False,
+                bgcolor="white",
+                font=dict(size=12)
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
+            # ---- Общий вид ----
+            fig.update_layout(
+                height=max(450, len(op_list) * 90),
+                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                hoverlabel=dict(bgcolor="white", font_size=13),
+                barmode='overlay',
+                bargap=0.2
+            )
 
-        # ---- Отладка (опционально) ----
-        with st.expander("🔍 Данные сегментов"):
-            st.json(ops_data)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ---- Отладочная таблица (показывает все данные) ----
+            with st.expander("🔍 Данные, переданные в диаграмму (проверьте все операции)"):
+                df_debug = pd.DataFrame([
+                    {
+                        "Операция": op,
+                        "Интервалов": len(segs),
+                        "Пример метки": segs[0]['desc'] if segs else "-"
+                    }
+                    for op, segs in ops_dict.items()
+                ])
+                st.dataframe(df_debug)
     else:
         st.info("Нет данных для построения диаграммы")
     # ================== Экспорт в Excel ==================

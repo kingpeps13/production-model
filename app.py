@@ -72,17 +72,14 @@ def calculate(data, Q, N):
     total_weight = 0.0
     can_weight = 4000.0  # грамм в канистре
     weight_map = {3: 3.36, 5: 5.6, 10: 11.2}
-    gram_counts = data.get('gram_counts', {})  # передаём из сессии
+    gram_counts = data.get('gram_counts', {})
 
     if is_glue:
-        # Вычисляем общий вес
         total_weight = 0.0
         for g, cnt in gram_counts.items():
             total_weight += cnt * weight_map.get(g, 0)
-        # Количество полных канистр и остаток
         can_count = int(total_weight // can_weight)
         remainder_grams = total_weight % can_weight
-        # Если остаток есть, можно предложить корректировку, но пока просто покажем
 
     # ---- Основные расчёты по операциям ----
     for op in operations:
@@ -233,7 +230,6 @@ def calculate(data, Q, N):
 with st.sidebar:
     st.header("📋 Параметры заказа")
 
-    # Загрузка шаблона
     uploaded_file = st.file_uploader("Загрузить шаблон (JSON)", type=["json"])
     if uploaded_file is not None:
         try:
@@ -245,7 +241,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Основные параметры
     st.session_state.product_name = st.text_input("Наименование продукта", value=st.session_state.product_name, key='pn_input')
     st.session_state.shift_start = st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, value=st.session_state.shift_start, step=0.5, key='ss_input')
     st.session_state.shift_duration = st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, value=st.session_state.shift_duration, step=0.5, key='sd_input')
@@ -291,7 +286,6 @@ with st.sidebar:
             st.session_state.operations.pop()
             st.rerun()
 
-    # Сохранение шаблона
     st.divider()
     json_data = template_to_json()
     st.download_button(
@@ -301,7 +295,6 @@ with st.sidebar:
         mime="application/json"
     )
 
-    # Кнопка расчёта
     st.divider()
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
         data = {
@@ -335,7 +328,6 @@ if st.session_state.result is not None:
     col3.metric("⏱️ Календарное время", f"{result['T']:.2f} ч")
     col4.metric("📅 Рабочих дней", result['days_needed'])
 
-    # Метрики для клея
     if result['is_glue']:
         c1, c2, c3 = st.columns(3)
         c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
@@ -348,7 +340,6 @@ if st.session_state.result is not None:
     st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
     st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
 
-    # Таблица операций
     st.subheader("📊 Детализация по операциям")
     df_ops = pd.DataFrame({
         "Операция": result['name_list'],
@@ -362,7 +353,6 @@ if st.session_state.result is not None:
     })
     st.dataframe(df_ops, use_container_width=True)
 
-    # Загрузка по дням
     st.subheader("📅 Загрузка по дням")
     if result['day_usage_dict']:
         df_days = pd.DataFrame()
@@ -375,7 +365,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # Диаграмма Ганта
+    # ================== ДИАГРАММА ГАНТА (исправленная) ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         try:
@@ -389,8 +379,7 @@ if st.session_state.result is not None:
                               color="Resource",
                               title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
                               color_discrete_sequence=px.colors.qualitative.Set3)
-            if result.get('name_list'):
-                fig.update_yaxis(categoryorder='array', categoryarray=result['name_list'])
+            # Убираем update_yaxis, чтобы избежать ошибки
             fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
                               height=600, font=dict(size=10),
                               legend_title='Интервалы')
@@ -400,7 +389,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных для построения диаграммы")
 
-    # Экспорт в Excel
+    # ================== Экспорт в Excel ==================
     st.subheader("💾 Экспорт")
     try:
         wb = Workbook()

@@ -360,22 +360,27 @@ if st.session_state.result is not None:
 
     # Диаграмма Ганта
     st.subheader("📈 Диаграмма Ганта")
-    if result['all_intervals']:
-        df_gantt = []
-        for start, end, label, _ in result['all_intervals']:
-            op_name = label.split(' (')[0] if not label.startswith('Наладка') else label.replace('Наладка ', '')
-            start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
-            end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
-            df_gantt.append(dict(Task=op_name, Start=start_dt, Finish=end_dt, Resource=label))
-        fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
-                          color="Resource",
-                          title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-                          color_discrete_sequence=px.colors.qualitative.Set3)
-        fig.update_yaxis(categoryorder='array', categoryarray=result['name_list'])
-        fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
-                          height=600, font=dict(size=10),
-                          legend_title='Интервалы')
-        st.plotly_chart(fig, use_container_width=True)
+        if result['all_intervals']:
+        try:
+            df_gantt = []
+            for start, end, label, _ in result['all_intervals']:
+                op_name = label.split(' (')[0] if not label.startswith('Наладка') else label.replace('Наладка ', '')
+                start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
+                end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
+                df_gantt.append(dict(Task=op_name, Start=start_dt, Finish=end_dt, Resource=label))
+            fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
+                              color="Resource",
+                              title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                              color_discrete_sequence=px.colors.qualitative.Set3)
+            # Проверяем, что name_list существует и не пуст
+            if result.get('name_list'):
+                fig.update_yaxis(categoryorder='array', categoryarray=result['name_list'])
+            fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
+                              height=600, font=dict(size=10),
+                              legend_title='Интервалы')
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Ошибка при построении диаграммы: {e}")
     else:
         st.info("Нет данных для построения диаграммы")
 

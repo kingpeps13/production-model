@@ -418,26 +418,69 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== Диаграмма Ганта ==================
+        # ================== ДИАГРАММА ГАНТА (matplotlib) ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         try:
-            df_gantt = []
-            for start, end, label, _ in result['all_intervals']:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            from datetime import datetime, timedelta
+
+            fig, ax = plt.subplots(figsize=(14, 6))
+            # Группируем интервалы по операциям
+            op_groups = {}
+            for start, end, label, color in result['all_intervals']:
                 op_name = label.split(' (')[0] if not label.startswith('Наладка') else label.replace('Наладка ', '')
-                start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
-                end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
-                df_gantt.append(dict(Task=op_name, Start=start_dt, Finish=end_dt, Resource=label))
-            df_gantt = pd.DataFrame(df_gantt)
-            fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
-                              color="Resource",
-                              title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-                              color_discrete_sequence=px.colors.qualitative.Set3,
-                              category_orders={"Task": result['name_list']})
-            fig.update_layout(xaxis_title='Время', yaxis_title='Операции',
-                              height=600, font=dict(size=10),
-                              legend_title='Интервалы')
-            st.plotly_chart(fig, use_container_width=True)
+                if op_name not in op_groups:
+                    op_groups[op_name] = []
+                op_groups[op_name].append((start, end, label, color))
+
+            # Упорядочиваем по порядку из списка операций
+            ordered_ops = result['name_list']
+            y_pos = 0
+            y_ticks = []
+            colors_map = {'#1f77b4': '#1f77b4', '#ff7f0e': '#ff7f0e', '#2ca02c': '#2ca02c',
+                          '#d62728': '#d62728', '#9467bd': '#9467bd', '#8c564b': '#8c564b',
+                          '#e377c2': '#e377c2', '#7f7f7f': '#7f7f7f', '#bcbd22': '#bcbd22',
+                          '#17becf': '#17becf'}
+            for op_name in ordered_ops:
+                if op_name not in op_groups:
+                    continue
+                intervals = op_groups[op_name]
+                intervals.sort(key=lambda x: x[0])  # по времени начала
+                for start, end, label, color in intervals:
+                    start_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=start)
+                    end_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=end)
+                    ax.barh(y_pos, (end_dt - start_dt).total_seconds()/3600, left=start_dt,
+                            color=color, edgecolor='black', height=0.5)
+                    # Подпись внутри полосы, если достаточно места
+                    if end - start > 0.3:
+                        ax.text(start_dt + (end_dt - start_dt)/2, y_pos, label,
+                                ha='center', va='center', fontsize=7,
+                                color='white' if sum([int(c,16) for c in color[1:3]]) < 200 else 'black')
+                    y_pos += 1
+                y_ticks.append((y_pos - len(intervals)/2 - 0.5, op_name))
+
+            # Вертикальная линия окончания заказа
+            T = result['T']
+            T_dt = datetime(2024, 1, 1, int(result['shift_start']), 0) + timedelta(hours=T)
+            ax.axvline(x=T_dt, color='red', linestyle='--', linewidth=2,
+                       label=f'Окончание заказа ({T:.2f} ч)')
+
+            # Настройка оси X
+            ax.set_xlabel('Время')
+            ax.set_ylabel('Операции')
+            ax.set_title(f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m %H:%M'))
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
+            ax.xaxis.set_minor_locator(mdates.HourLocator(interval=1))
+            fig.autofmt_xdate()
+            ax.set_yticks([pos for pos, _ in y_ticks])
+            ax.set_yticklabels([name for _, name in y_ticks])
+            ax.grid(axis='x', linestyle='--', alpha=0.5)
+            ax.legend()
+            plt.tight_layout()
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"Ошибка при построении диаграммы: {e}")
     else:

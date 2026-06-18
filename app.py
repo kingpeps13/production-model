@@ -4,8 +4,7 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import plotly.graph_objects as go
 import io
 from openpyxl import Workbook
 
@@ -13,20 +12,22 @@ st.set_page_config(page_title="Модель расчёта производст�
 st.title("🏭 Модель расчёта календарного времени выполнения заказа")
 
 # ================== Инициализация сессии ==================
+# Все параметры хранятся в session_state по ключам, соответствующим виджетам
 defaults = {
     "operations": [],
     "grammovki": [],
     "gram_counts": {},
     "product_name": "",
     "shift_start": 8.0,
-    "shift_duration": 8.0,
+    "shift_duration": 9.0,
     "is_glue": False,
     "result": None,
     "template_name": "template",
     "correction_choice": False,
+    # Ключи виджетов
     "pn_input": "",
     "ss_input": 8.0,
-    "sd_input": 8.0,
+    "sd_input": 9.0,
     "ig_input": False,
     "gs_input": [],
     "q_input": 1200,
@@ -53,11 +54,13 @@ def template_to_json():
 
 def load_template_from_json(json_str):
     data = json.loads(json_str)
+    # Обновляем ключи виджетов
     st.session_state.pn_input = data.get('product_name', "")
     st.session_state.ss_input = data.get('shift_start', 8.0)
     st.session_state.sd_input = data.get('shift_duration', 9.0)
     st.session_state.ig_input = data.get('is_glue', False)
     st.session_state.gs_input = data.get('grammovki', [])
+    # Обновляем количества для граммовок
     gram_counts = data.get('gram_counts', {})
     for g in [3,5,10]:
         st.session_state[f"g_{g}"] = gram_counts.get(g, 0)
@@ -66,17 +69,20 @@ def load_template_from_json(json_str):
     st.rerun()
 
 def clear_all():
+    """Сбрасывает все параметры на начальные (пустые) и удаляет ключи виджетов"""
     keys_to_clear = ['pn_input', 'ss_input', 'sd_input', 'ig_input', 'gs_input',
                      'q_input', 'n_input', 'operations', 'result', 'correction_choice']
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
+    # Сбросить граммовки
     for g in [3,5,10]:
         if f"g_{g}" in st.session_state:
             del st.session_state[f"g_{g}"]
+    # Установить значения по умолчанию
     st.session_state.pn_input = ""
     st.session_state.ss_input = 8.0
-    st.session_state.sd_input = 8.0
+    st.session_state.sd_input = 9.0
     st.session_state.ig_input = False
     st.session_state.gs_input = []
     st.session_state.operations = []
@@ -88,7 +94,7 @@ def clear_all():
 def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
     shift_start = data.get('shift_start', 8.0)
-    shift_duration = data.get('shift_duration', 8.0)
+    shift_duration = data.get('shift_duration', 9.0)
     operations = data['operations']
     is_glue = data.get('is_glue', False)
     hours_per_day = shift_duration
@@ -286,6 +292,7 @@ def calculate(data, Q, N, correction_choice):
 with st.sidebar:
     st.header("📋 Параметры заказа")
 
+    # --- Загрузка шаблона ---
     uploaded_file = st.file_uploader("Загрузить шаблон (JSON)", type=["json"])
     if uploaded_file is not None:
         try:
@@ -297,17 +304,21 @@ with st.sidebar:
 
     st.divider()
 
+    # --- Основные параметры (только key, без value) ---
     st.text_input("Наименование продукта", key='pn_input')
     st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, step=0.5, key='ss_input')
     st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, step=0.5, key='sd_input')
     st.checkbox("Это клей?", key='ig_input')
 
+    # --- Граммовки клея ---
     if st.session_state.ig_input:
         st.subheader("🧴 Граммовки клея")
         all_gram = [3, 5, 10]
         st.multiselect("Выберите граммовки", all_gram, key='gs_input')
+        # Для каждой выбранной граммовки – поле ввода количества
         for g in st.session_state.gs_input:
             st.number_input(f"Количество {g} мл", min_value=0, step=50, key=f"g_{g}")
+        # Подсчёт общего заказа
         total_q = sum(st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input)
         st.info(f"Общий заказ: {total_q} шт")
         st.checkbox("Корректировать заказ до полных 4-кг канистр (увеличить)", key='correction_choice')
@@ -318,7 +329,10 @@ with st.sidebar:
     st.number_input("Размер наряда (передаточной партии)", min_value=1, step=50, key='n_input')
 
     st.divider()
+
+    # --- Операции ---
     st.subheader("🔧 Операции")
+    # Перебираем операции из session_state.operations
     for i, op in enumerate(st.session_state.operations):
         with st.expander(f"Операция {i+1}: {op['name']}"):
             st.text_input("Название", value=op['name'], key=f"name_{i}")
@@ -328,7 +342,10 @@ with st.sidebar:
             st.number_input("Человек", min_value=1, step=1, value=op.get('people', 1), key=f"people_{i}")
             st.checkbox("Ежедневная наладка", value=op.get('daily_setup', False), key=f"daily_{i}")
             st.number_input("Макс. часов в день", min_value=1.0, step=0.5, value=op.get('max_hours_per_day', 8.0), key=f"maxh_{i}")
+            # Сохраняем изменения обратно в operations (это не обязательно, т.к. виджеты с key хранят значения отдельно)
+            # Но для чтения мы будем использовать session_state, а не op.
 
+    # Кнопки управления операциями
     col1, col2 = st.columns(2)
     if col1.button("➕ Добавить операцию"):
         new_op = {"name": f"Операция {len(st.session_state.operations)+1}", "prod": 100.0, "setup": 0.0, "equip": 1, "people": 1, "daily_setup": False, "max_hours_per_day": 8.0}
@@ -341,7 +358,13 @@ with st.sidebar:
         else:
             st.warning("Нельзя удалить последнюю операцию")
 
+    # Чтобы изменения в виджетах операций сохранялись в session_state.operations,
+    # нужно при каждом изменении обновлять список. Но проще после нажатия "Рассчитать"
+    # собрать данные из session_state. Сделаем это в кнопке расчёта.
+
     st.divider()
+
+    # --- Сохранение шаблона ---
     st.text_input("Имя шаблона для сохранения", key='template_name_input')
     json_data = template_to_json()
     st.download_button(
@@ -352,11 +375,17 @@ with st.sidebar:
     )
 
     st.divider()
+
+    # --- Кнопка "Очистить всё" ---
     if st.button("🧹 Очистить всё", type="secondary", use_container_width=True):
         clear_all()
 
     st.divider()
+
+    # --- Кнопка расчёта ---
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
+        # Собираем данные из session_state
+        # Операции: обновляем их на основе значений из виджетов
         ops = []
         for i in range(len(st.session_state.operations)):
             op = {
@@ -369,7 +398,7 @@ with st.sidebar:
                 "max_hours_per_day": st.session_state.get(f"maxh_{i}", 8.0)
             }
             ops.append(op)
-        st.session_state.operations = ops
+        st.session_state.operations = ops  # сохраняем обратно
 
         data = {
             "product_name": st.session_state.pn_input,
@@ -389,6 +418,7 @@ with st.sidebar:
         with st.spinner("Выполняется расчёт..."):
             result = calculate(data, Q, N, correction)
         st.session_state.result = result
+        # Если была корректировка, обновляем gram_counts
         if result.get('corrected'):
             for g, cnt in result['gram_counts'].items():
                 st.session_state[f"g_{g}"] = cnt
@@ -450,12 +480,11 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ДИАГРАММА ГАНТА (matplotlib) ==================
+    # ================== ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
     if result['all_intervals']:
         hours_per_day = result['hours_per_day']
 
-        # Группируем интервалы по операциям
         ops_dict = {}
         for start, end, label, color in result['all_intervals']:
             if end <= start:
@@ -467,56 +496,82 @@ if st.session_state.result is not None:
                     operation = label.split(" (нар.")[0].strip()
                 else:
                     operation = label.strip()
-            day = start / hours_per_day          # позиция в днях (может быть дробной)
-            duration = (end - start) / hours_per_day  # длительность в днях
+            day = int(start // hours_per_day)
+            start_in_day = start - day * hours_per_day
+            duration_days = (end - start) / hours_per_day
+
             if operation not in ops_dict:
                 ops_dict[operation] = []
-            ops_dict[operation].append((day, duration, label, color))
+            ops_dict[operation].append({
+                'day': day,
+                'start_in_day': start_in_day,
+                'duration_days': duration_days,
+                'color': color,
+                'desc': label
+            })
 
         if not ops_dict:
             st.warning("Нет данных для отображения")
         else:
-            fig, ax = plt.subplots(figsize=(12, 6))
+            fig = go.Figure()
             op_list = result['name_list']
             palette = px.colors.qualitative.Plotly
             op_colors = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
             op_colors["Наладка"] = "gray"
 
-            y_pos = 0
-            y_ticks = []
-            for op in op_list:
-                if op not in ops_dict:
-                    continue
-                intervals = ops_dict[op]
-                intervals.sort(key=lambda x: x[0])
-                for day, duration, label, color in intervals:
-                    ax.barh(y_pos, width=duration, left=day, color=color, edgecolor='black', height=0.5)
-                    if duration > 0.1:
-                        ax.text(day + duration/2, y_pos, label, ha='center', va='center', fontsize=8,
-                                color='white' if sum([int(c,16) for c in color[1:3]]) < 200 else 'black')
-                y_ticks.append(y_pos)
-                y_pos += 1
+            for op, segments in ops_dict.items():
+                for seg in segments:
+                    x_start = seg['day'] + seg['start_in_day'] / hours_per_day
+                    fig.add_trace(go.Bar(
+                        x=[x_start],
+                        y=[op],
+                        width=[seg['duration_days']],
+                        orientation='h',
+                        marker_color=seg['color'],
+                        hovertemplate=(
+                            f"<b>{seg['desc']}</b><br>"
+                            f"День: {seg['day']+1}<br>"
+                            f"Начало в день: {seg['start_in_day']:.2f} ч<br>"
+                            f"Длительность: {seg['duration_days']:.2f} дн<extra></extra>"
+                        ),
+                        showlegend=False
+                    ))
 
-            ax.set_yticks(y_ticks)
-            ax.set_yticklabels(op_list)
-            ax.set_ylabel("Операция")
-            ax.set_xlabel("День")
-            ax.set_title(f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)')
-            ax.grid(axis='x', linestyle='--', alpha=0.7)
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder='array',
+                categoryarray=op_list,
+                title_text="Операция"
+            )
+            max_day = max((seg['day'] for segs in ops_dict.values() for seg in segs), default=0)
+            fig.update_xaxes(
+                title_text="День",
+                tickvals=list(range(max_day + 2)),
+                ticktext=[f"День {i+1}" for i in range(max_day + 2)],
+                showgrid=True
+            )
 
             finish_day = result['T'] / hours_per_day
-            ax.axvline(x=finish_day, color='red', linestyle='--', linewidth=2,
-                       label=f'Конец заказа ({result["T"]:.2f} ч)')
-            ax.legend()
-            plt.tight_layout()
-            st.pyplot(fig)
+            fig.add_vline(x=finish_day, line_width=2, line_dash="dash", line_color="red")
+            fig.add_annotation(
+                x=finish_day,
+                y=1,
+                yref="paper",
+                text=f"Конец заказа<br>{result['T']:.2f} ч",
+                showarrow=False,
+                bgcolor="white",
+                font=dict(size=12)
+            )
 
-            # Опционально: отладочная информация
-            with st.expander("🔍 Данные для Ганта (проверка)"):
-                debug_rows = []
-                for op, intervals in ops_dict.items():
-                    debug_rows.append({"Операция": op, "Количество интервалов": len(intervals)})
-                st.dataframe(pd.DataFrame(debug_rows))
+            fig.update_layout(
+                height=max(450, len(op_list) * 90),
+                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                hoverlabel=dict(bgcolor="white", font_size=13),
+                barmode='overlay',
+                bargap=0.2
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Нет данных для построения диаграммы")
 

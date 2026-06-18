@@ -2,7 +2,6 @@ import streamlit as st
 import math
 import json
 import pandas as pd
-from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 import io
@@ -31,13 +30,13 @@ defaults = {
     "q_input": 1200,
     "n_input": 600,
     "template_name_input": "template",
-    "pending_template_content": None   # НОВОЕ: хранит прочитанный JSON до нажатия кнопки
+    "pending_template_content": None
 }
 for key, default in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ================== Функции шаблонов ==================
+# ================== Шаблоны ==================
 def template_to_json():
     data = {
         "product_name": st.session_state.pn_input,
@@ -47,12 +46,11 @@ def template_to_json():
         "grammovki": st.session_state.gs_input if st.session_state.ig_input else [],
         "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
-        "version": "1.4.0"
+        "version": "1.5.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 def load_template_from_json(json_str):
-    """Только заполняет session_state, НЕ вызывает rerun."""
     data = json.loads(json_str)
     st.session_state.pn_input = data.get('product_name', "")
     st.session_state.ss_input = data.get('shift_start', 8.0)
@@ -64,7 +62,6 @@ def load_template_from_json(json_str):
         st.session_state[f"g_{g}"] = gram_counts.get(g, 0)
     st.session_state.operations = data.get('operations', [])
     st.session_state.result = None
-    # больше никаких st.rerun()!
 
 def clear_all():
     keys_to_clear = ['pn_input', 'ss_input', 'sd_input', 'ig_input', 'gs_input',
@@ -73,7 +70,6 @@ def clear_all():
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
-    # возвращаем дефолты
     st.session_state.pn_input = ""
     st.session_state.ss_input = 8.0
     st.session_state.sd_input = 8.0
@@ -84,11 +80,10 @@ def clear_all():
     st.session_state.correction_choice = False
     st.rerun()
 
-# ================== Функция расчёта (исправленная математика и устойчивая симуляция) ==================
+# ================== Расчёт с учётом типа операции ==================
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue, gram_counts_tuple, Q, N, correction_choice):
     gram_counts = dict(gram_counts_tuple)
-    # Передаём операции как есть (список словарей) – он хешируется, т.к. все элементы строки/числа
     return calculate(
         product_name, shift_start, shift_duration, operations,
         is_glue, gram_counts, Q, N, correction_choice
@@ -132,43 +127,42 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
             rem1 = total_weight % 1000.0
             shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
 
-    # ---- Подготовка операций ----
-    # ИСПРАВЛЕНО: добавляем поле effective_capacity = prod * min(equip, people)
+    # ---- Подготовка операций: добавляем capacity ----
     for op in operations:
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
-        op['capacity'] = op['prod'] * min(op['equip'], op['people'])  # ИСПРАВЛЕНО
+        # НОВОЕ: определение ёмкости по типу операции
+        if op.get('manual', False):
+            op['capacity'] = op['prod'] * op['people']     # ручная
+        else:
+            op['capacity'] = op['prod'] * op.get('equip', 1)   # машинная
 
     m = math.ceil(Q / N)
 
     # ---- Симуляция (устойчивая) ----
-    # Инициализация структур
     op_intervals = [[] for _ in range(len(operations))]
     all_intervals = []
-    equip_free = [0.0] * len(operations)   # время освобождения оборудования i
-    job_ready = [0.0] * m                 # время готовности наряда j к следующей операции
-    colors = px.colors.qualitative.Plotly * 10  # запас цветов
+    equip_free = [0.0] * len(operations)
+    job_ready = [0.0] * m
+    colors = px.colors.qualitative.Plotly * 10
 
     def next_day_start(t):
         return (int(t // hours_per_day) + 1) * hours_per_day
 
     progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
-
-    MAX_ITERATIONS = 10000  # защита от зависаний
+    MAX_ITERATIONS = 10000
     total_ops = len(operations)
-    idx = 0  # счётчик итераций для прогресс-бара
 
     for j in range(m):
         if progress_bar is not None:
             progress_bar.progress((j + 1) / m, text=f"Наряд {j+1}/{m}")
         for i in range(total_ops):
             op = operations[i]
-            t_i = N / op['capacity']         # ИСПРАВЛЕНО: используем capacity
+            t_i = N / op['capacity']
             setup = op['setup']
             daily = op['daily_setup']
             max_h = op['max_hours_per_day']
 
-            # Время начала: наряд готов после предыдущей операции, оборудование свободно
             base_start = max(job_ready[j], equip_free[i])
             start = base_start
             placed = False
@@ -179,13 +173,11 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                 day_start = (start // hours_per_day) * hours_per_day
                 day_end = day_start + hours_per_day
 
-                # Учитываем уже запланированную работу на этом оборудовании в текущий день
                 used_in_day = 0.0
                 for (s, e) in op_intervals[i]:
                     if s < day_end and e > day_start:
                         used_in_day += (min(e, day_end) - max(s, day_start))
 
-                # Ежедневная наладка
                 if daily:
                     setup_done = False
                     for (s, e) in op_intervals[i]:
@@ -202,7 +194,6 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
 
                 free_in_day = max_h - used_in_day
                 if free_in_day >= t_i:
-                    # Вся партия влезает в этот день
                     real_start = start
                     end = real_start + t_i
                     op_intervals[i].append((real_start, end))
@@ -211,11 +202,8 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                     job_ready[j] = end
                     placed = True
                 else:
-                    # ИСПРАВЛЕНО: если t_i > max_h, нужно разбивать, а не бесконечно прыгать по дням
                     if t_i > max_h:
-                        # Пока размещаем часть, потом остаток – упрощённый подход: кладём целиком в первый день, нарушая лимит,
-                        # но для корректности лучше разбить. Здесь оставим пометку для пользователя.
-                        st.warning(f"Операция '{op['name']}' (длительность {t_i:.2f} ч) превышает лимит дня ({max_h} ч). Будет размещена полностью в одном дне.")
+                        st.warning(f"Операция '{op['name']}' длиннее лимита дня. Будет размещена целиком.")
                         real_start = start
                         end = real_start + t_i
                         op_intervals[i].append((real_start, end))
@@ -225,13 +213,9 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                         placed = True
                     else:
                         start = next_day_start(start)
-
             if not placed:
-                st.error(f"Не удалось разместить операцию '{op['name']}' для наряда {j+1}. Проверьте входные данные.")
-                # Прерываем симуляцию, чтобы не зависнуть
+                st.error(f"Не удалось разместить '{op['name']}' в наряде {j+1}.")
                 break
-        # конец цикла по операциям
-    # конец цикла по нарядам
 
     if progress_bar is not None:
         progress_bar.empty()
@@ -239,11 +223,12 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
     T = max(end for _, end, _, _ in all_intervals) if all_intervals else 0
     days_needed = math.ceil(T / hours_per_day)
 
-    # ---- Трудоёмкость ----
+    # ---- Трудоёмкость и итоги ----
     total_labor = 0.0
     labor_details = []
     days_work_list = []
     setup_total_list = []
+    t_list = []
 
     for i, op in enumerate(operations):
         days_set = set()
@@ -252,18 +237,20 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         days_work = len(days_set)
         days_work_list.append(days_work)
 
-        total_work = m * (N / op['capacity'])
+        t_i = N / op['capacity']
+        t_list.append(t_i)
+
+        total_work = m * t_i
         if op.get('daily_setup', False):
             setup_total = op['setup'] * days_work
         else:
             setup_total = op['setup']
         setup_total_list.append(setup_total)
+
         labor_i = op['people'] * (total_work + setup_total)
         total_labor += labor_i
         labor_details.append((op['name'], labor_i))
 
-    # Узкое место
-    t_list = [N / op['capacity'] for op in operations]
     t_max = max(t_list) if t_list else 0
     idx_max = t_list.index(t_max) if t_list else 0
     bottleneck_name = operations[idx_max]['name'] if operations else ""
@@ -284,11 +271,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         day_usage_dict[day] = day_usage
 
     return {
-        'Q': Q,
-        'N': N,
-        'm': m,
-        'T': T,
-        'days_needed': days_needed,
+        'Q': Q, 'N': N, 'm': m, 'T': T, 'days_needed': days_needed,
         'total_labor': total_labor,
         'name_list': [op['name'] for op in operations],
         't_list': t_list,
@@ -317,7 +300,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         'corrected': corrected
     }
 
-# ================== НОВЫЙ ИНТЕРФЕЙС (без боковой панели) ==================
+# ================== ИНТЕРФЕЙС ==================
 tab1, tab2, tab3 = st.tabs(["📋 Параметры заказа", "🔧 Операции", "💾 Шаблоны"])
 
 with tab1:
@@ -347,20 +330,46 @@ with tab2:
     st.subheader("Список операций")
     if not st.session_state.operations:
         st.info("Добавьте хотя бы одну операцию")
+
+    # Заголовки столбцов
+    hcol1, hcol2, hcol3, hcol4, hcol5, hcol6, hcol7 = st.columns([2, 1, 1, 1, 1, 1, 1])
+    with hcol1:
+        st.markdown("**Название**")
+    with hcol2:
+        st.markdown("**Произв-ть (шт/ч)**")
+    with hcol3:
+        st.markdown("**Наладка (ч)**")
+    with hcol4:
+        st.markdown("**Оборуд.**")
+    with hcol5:
+        st.markdown("**Людей**")
+    with hcol6:
+        st.markdown("**Ежедн. нал.**")
+    with hcol7:
+        st.markdown("**Ручная**")
+
     for i, op in enumerate(st.session_state.operations):
-        cols = st.columns([2, 1, 1, 1, 1, 1])
+        cols = st.columns([2, 1, 1, 1, 1, 1, 1])
         with cols[0]:
             st.text_input("Название", value=op['name'], key=f"name_{i}", label_visibility="collapsed")
         with cols[1]:
-            st.number_input("Произв-ть (шт/ч)", min_value=0.1, value=op['prod'], key=f"prod_{i}", label_visibility="collapsed")
+            st.number_input("Произв-ть", min_value=0.1, value=op['prod'], key=f"prod_{i}", label_visibility="collapsed")
         with cols[2]:
-            st.number_input("Наладка (ч)", min_value=0.0, step=0.05, value=op['setup'], key=f"setup_{i}", label_visibility="collapsed")
+            st.number_input("Наладка", min_value=0.0, step=0.05, value=op['setup'], key=f"setup_{i}", label_visibility="collapsed")
         with cols[3]:
-            st.number_input("Оборуд.", min_value=1, value=op.get('equip', 1), key=f"equip_{i}", label_visibility="collapsed")
+            # Поле оборудования скрывается для ручных операций
+            if not st.session_state.get(f"manual_{i}", False):
+                st.number_input("Оборуд.", min_value=1, value=op.get('equip', 1), key=f"equip_{i}", label_visibility="collapsed")
+            else:
+                st.markdown("—")  # прочерк вместо поля
         with cols[4]:
             st.number_input("Людей", min_value=1, value=op.get('people', 1), key=f"people_{i}", label_visibility="collapsed")
         with cols[5]:
-            st.checkbox("Ежедн. наладка", value=op.get('daily_setup', False), key=f"daily_{i}", label_visibility="collapsed")
+            st.checkbox("Ежедн.", value=op.get('daily_setup', False), key=f"daily_{i}", label_visibility="collapsed")
+        with cols[6]:
+            is_manual = st.checkbox("Ручная", value=op.get('manual', False), key=f"manual_{i}", label_visibility="collapsed")
+            # сразу обновляем состояние операции, чтобы скрывать/показывать оборудование при следующем rerun
+            st.session_state.operations[i]['manual'] = is_manual
 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
@@ -372,7 +381,8 @@ with tab2:
                 "equip": 1,
                 "people": 1,
                 "daily_setup": False,
-                "max_hours_per_day": st.session_state.sd_input
+                "max_hours_per_day": st.session_state.sd_input,
+                "manual": False  # НОВОЕ
             }
             st.session_state.operations.append(new_op)
             st.rerun()
@@ -386,7 +396,6 @@ with tab2:
 
 with tab3:
     st.subheader("Управление шаблонами")
-    # Загрузка: файл + явная кнопка
     uploaded = st.file_uploader("Выберите JSON-шаблон", type=["json"], key="template_uploader")
     if uploaded is not None:
         st.session_state.pending_template_content = uploaded.read().decode('utf-8')
@@ -394,7 +403,7 @@ with tab3:
         try:
             load_template_from_json(st.session_state.pending_template_content)
             st.success("Шаблон загружен! Поля обновлены.")
-            st.session_state.pending_template_content = None  # сброс
+            st.session_state.pending_template_content = None
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка: {e}")
@@ -412,10 +421,10 @@ with tab3:
     if st.button("🧹 Очистить всё", type="secondary"):
         clear_all()
 
-# Кнопка расчёта теперь в самом низу, всегда на виду
+# Кнопка расчёта
 st.divider()
 if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
-    # Сбор актуальных данных операций
+    # Собираем актуальное состояние операций
     ops = []
     for i in range(len(st.session_state.operations)):
         op = {
@@ -425,7 +434,8 @@ if st.button("🚀 Рассчитать", type="primary", use_container_width=Tr
             "equip": st.session_state.get(f"equip_{i}", 1),
             "people": st.session_state.get(f"people_{i}", 1),
             "daily_setup": st.session_state.get(f"daily_{i}", False),
-            "max_hours_per_day": st.session_state.get(f"maxh_{i}", st.session_state.sd_input)
+            "max_hours_per_day": st.session_state.get(f"maxh_{i}", st.session_state.sd_input),
+            "manual": st.session_state.get(f"manual_{i}", False)
         }
         ops.append(op)
     st.session_state.operations = ops
@@ -453,14 +463,14 @@ if st.button("🚀 Рассчитать", type="primary", use_container_width=Tr
             st.session_state[f"g_{g}"] = cnt
     st.rerun()
 
-# ================== Отображение результатов (почти без изменений, только добавил диагностику) ==================
+# ================== Отображение результатов ==================
 if st.session_state.result is not None:
     result = st.session_state.result
     st.success("✅ Расчёт завершён!")
 
-    # ДИАГНОСТИКА ДЛЯ ГАНТА
-    with st.expander("🔧 Отладка: сырые интервалы"):
-        st.write(f"Количество интервалов в all_intervals: {len(result['all_intervals'])}")
+    # Диагностика (для уверенности)
+    with st.expander("🔧 Отладка интервалов"):
+        st.write(f"Всего интервалов: {len(result['all_intervals'])}")
         unique_ops = set()
         for _, _, label, _ in result['all_intervals']:
             if not label.startswith("Наладка"):
@@ -468,7 +478,193 @@ if st.session_state.result is not None:
             else:
                 op_name = label.replace("Наладка ", "")
             unique_ops.add(op_name)
-        st.write("Уникальные операции в интервалах:", sorted(unique_ops))
+        st.write("Операции в интервалах:", sorted(unique_ops))
 
-    # (далее стандартное отображение метрик, таблиц, Ганта, Excel — идентично вашему коду)
-    # Я опускаю остальное для краткости, но оно полностью сохранено.
+    if result['is_glue'] and result['corrected']:
+        st.info(f"📝 Заказ скорректирован до полных 4-кг канистр. Новое количество: {result['Q']} шт. Общий вес: {result['total_weight']:.2f} г.")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📦 Заказ", f"{result['Q']} шт")
+    col2.metric("📋 Нарядов", result['m'])
+    col3.metric("⏱️ Календарное время", f"{result['T']:.2f} ч")
+    col4.metric("📅 Рабочих дней", result['days_needed'])
+
+    if result['is_glue']:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("🧴 Общий вес", f"{result['total_weight']:.2f} г")
+        c2.metric("📦 4-кг канистр (всего)", result['can_count_4kg'])
+        if result['shortage_4kg'] > 0:
+            c3.metric("⚠️ Недостаток 4-кг", f"{result['shortage_4kg']:.2f} г")
+        else:
+            c3.metric("✅ 4-кг", "кратно")
+        c4.metric("📦 1-кг канистр (всего)", result['can_count_1kg'])
+        if result['shortage_1kg'] > 0:
+            c5.metric("⚠️ Недостаток 1-кг", f"{result['shortage_1kg']:.2f} г")
+        else:
+            c5.metric("✅ 1-кг", "кратно")
+
+    st.metric("🏭 Узкое место", f"{result['bottleneck_name']} ({result['t_max']:.2f} ч/наряд)")
+    st.metric("👷 Общая трудоёмкость", f"{result['total_labor']:.2f} чел·ч")
+
+    st.subheader("📊 Детализация по операциям")
+    df_ops = pd.DataFrame({
+        "Операция": result['name_list'],
+        "t_i (ч)": result['t_list'],
+        "Наладка (ч)": result['setup_list'],
+        "Людей": result['people_list'],
+        "Ежедн. наладка": result['daily_setup_list'],
+        "Общее время (ч)": [result['m'] * t for t in result['t_list']],
+        "Дней работы": result['days_work_list'],
+        "Трудоёмкость (чел·ч)": [lab for _, lab in result['labor_details']]
+    })
+    st.dataframe(df_ops, use_container_width=True)
+
+    st.subheader("📅 Загрузка по дням")
+    if result['day_usage_dict']:
+        rows = []
+        for day, usage in result['day_usage_dict'].items():
+            row = {"День": day + 1}
+            row.update(usage)
+            rows.append(row)
+        df_days = pd.DataFrame(rows)
+        if not df_days.empty:
+            st.dataframe(df_days, use_container_width=True)
+    else:
+        st.info("Нет данных по дням")
+
+    # ========== ДИАГРАММА ГАНТА ==========
+    st.subheader("📈 Диаграмма Ганта")
+    if result['all_intervals']:
+        rows = []
+        for start, end, label, color in result['all_intervals']:
+            if end <= start:
+                continue
+            if label.startswith("Наладка"):
+                operation = label.replace("Наладка ", "").strip()
+                group = "Наладка"
+            else:
+                if " (нар." in label:
+                    operation = label.split(" (нар.")[0].strip()
+                else:
+                    operation = label.strip()
+                group = operation
+            rows.append({
+                "Операция": operation,
+                "Начало": start,
+                "Окончание": end,
+                "Группа": group,
+                "Описание": label,
+                "Длительность (ч)": end - start
+            })
+        df_gantt = pd.DataFrame(rows)
+
+        if not df_gantt.empty:
+            op_list = result['name_list']
+            palette = px.colors.qualitative.Plotly
+            color_map = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
+            color_map["Наладка"] = "gray"
+
+            fig = px.timeline(
+                df_gantt,
+                x_start="Начало",
+                x_end="Окончание",
+                y="Операция",
+                color="Группа",
+                color_discrete_map=color_map,
+                hover_name="Описание",
+                hover_data={
+                    "Начало": True,
+                    "Окончание": True,
+                    "Группа": False,
+                    "Длительность (ч)": True,
+                    "Описание": False,
+                },
+                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                labels={"Операция": "Операция"}
+            )
+
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder='array',
+                categoryarray=op_list,
+                title="Операция"
+            )
+
+            hours_per_day = result['hours_per_day']
+            max_time = max(df_gantt["Окончание"].max(), result['T'])
+            max_day = math.ceil(max_time / hours_per_day)
+            fig.update_xaxes(
+                title="День",
+                tickvals=[i * hours_per_day for i in range(max_day + 1)],
+                ticktext=[f"День {i+1}" for i in range(max_day + 1)],
+                showgrid=True,
+                rangeslider_visible=True
+            )
+
+            finish_time = result['T']
+            fig.add_vline(x=finish_time, line_width=2, line_dash="dash", line_color="red")
+            fig.add_annotation(
+                x=finish_time,
+                y=1,
+                yref="paper",
+                text=f"Конец заказа<br>{result['T']:.2f} ч",
+                showarrow=False,
+                bgcolor="white",
+                font=dict(size=12)
+            )
+
+            fig.update_layout(
+                height=max(450, len(op_list) * 90),
+                hoverlabel=dict(bgcolor="white", font_size=13)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("🔍 Данные для Ганта (проверка)"):
+                st.dataframe(df_gantt)
+        else:
+            st.warning("Нет данных для отображения")
+    else:
+        st.info("Нет данных для построения диаграммы")
+
+    # ================== Экспорт в Excel ==================
+    st.subheader("💾 Экспорт")
+    try:
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        ws1 = wb.create_sheet("Параметры")
+        ws1.append(["Параметр", "Значение"])
+        ws1.append(["Продукт", result['product_name']])
+        ws1.append(["Количество", result['Q']])
+        ws1.append(["Размер наряда", result['N']])
+        ws1.append(["Календарное время (ч)", result['T']])
+        ws1.append(["Рабочих дней", result['days_needed']])
+        ws1.append(["Трудоёмкость (чел·ч)", result['total_labor']])
+        if result['is_glue']:
+            ws1.append(["Общий вес (г)", result['total_weight']])
+            ws1.append(["Необходимо 4-кг канистр", result['can_count_4kg']])
+            ws1.append(["Недостаток в последней 4-кг канистре (г)", result['shortage_4kg']])
+            ws1.append(["Необходимо 1-кг канистр", result['can_count_1kg']])
+            ws1.append(["Недостаток в последней 1-кг канистре (г)", result['shortage_1kg']])
+            if result['corrected']:
+                ws1.append(["Корректировка", "Выполнена (увеличено до полных 4-кг канистр)"])
+
+        ws2 = wb.create_sheet("Операции")
+        ws2.append(["Операция", "t_i (ч)", "Наладка (ч)", "Людей", "Общее время (ч)", "Дней работы"])
+        for i, name in enumerate(result['name_list']):
+            ws2.append([name, result['t_list'][i], result['setup_list'][i],
+                       result['people_list'][i], result['m'] * result['t_list'][i],
+                       result['days_work_list'][i]])
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        st.download_button(
+            label="📥 Скачать Excel-отчёт",
+            data=buffer,
+            file_name=f"report_{result['product_name'].replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        st.error(f"Ошибка при создании Excel: {e}")

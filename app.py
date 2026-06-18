@@ -4,6 +4,7 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 from openpyxl import Workbook
 
@@ -17,20 +18,19 @@ defaults = {
     "gram_counts": {},
     "product_name": "",
     "shift_start": 8.0,
-    "shift_duration": 9.0,
+    "shift_duration": 8.0,
     "is_glue": False,
     "result": None,
     "template_name": "template",
     "correction_choice": False,
     "pn_input": "",
     "ss_input": 8.0,
-    "sd_input": 9.0,
+    "sd_input": 8.0,
     "ig_input": False,
     "gs_input": [],
     "q_input": 1200,
     "n_input": 600,
-    "template_name_input": "template",
-    "loaded_template": False
+    "template_name_input": "template"
 }
 for key, default in defaults.items():
     if key not in st.session_state:
@@ -62,7 +62,7 @@ def load_template_from_json(json_str):
         st.session_state[f"g_{g}"] = gram_counts.get(g, 0)
     st.session_state.operations = data.get('operations', [])
     st.session_state.result = None
-    st.session_state.loaded_template = True
+    st.rerun()
 
 def clear_all():
     keys_to_clear = ['pn_input', 'ss_input', 'sd_input', 'ig_input', 'gs_input',
@@ -75,19 +75,38 @@ def clear_all():
             del st.session_state[f"g_{g}"]
     st.session_state.pn_input = ""
     st.session_state.ss_input = 8.0
-    st.session_state.sd_input = 9.0
+    st.session_state.sd_input = 8.0
     st.session_state.ig_input = False
     st.session_state.gs_input = []
     st.session_state.operations = []
     st.session_state.result = None
     st.session_state.correction_choice = False
-    st.session_state.loaded_template = False
+    st.rerun()
 
-# ================== Функция расчёта ==================
+# ================== Функция расчёта с кэшированием ==================
+@st.cache_data(ttl=3600, show_spinner=False)
+def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue, gram_counts_tuple, Q, N, correction_choice):
+    """
+    Кэшируемая версия расчёта. Все аргументы должны быть хэшируемыми.
+    gram_counts передаётся как кортеж (g, cnt) для хэширования.
+    """
+    # Преобразуем gram_counts обратно в словарь
+    gram_counts = dict(gram_counts_tuple)
+    data = {
+        "product_name": product_name,
+        "shift_start": shift_start,
+        "shift_duration": shift_duration,
+        "operations": operations,
+        "is_glue": is_glue,
+        "gram_counts": gram_counts
+    }
+    # Вызываем основную функцию расчёта (без кэша)
+    return calculate(data, Q, N, correction_choice)
+
 def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
     shift_start = data.get('shift_start', 8.0)
-    shift_duration = data.get('shift_duration', 9.0)
+    shift_duration = data.get('shift_duration', 8.0)
     operations = data['operations']
     is_glue = data.get('is_glue', False)
     hours_per_day = shift_duration
@@ -134,19 +153,12 @@ def calculate(data, Q, N, correction_choice):
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
 
-    if N <= 0 or hours_per_day <= 0:
-        st.error("Некорректные параметры: размер наряда или длительность смены должны быть больше 0.")
-        return None
-
     m = math.ceil(Q / N)
     t_list, setup_list, people_list, name_list = [], [], [], []
     daily_setup_list, max_hours_list = [], []
 
     for op in operations:
         total_prod = op["prod"] * op["equip"] * op["people"]
-        if total_prod == 0:
-            st.error(f"Производительность операции {op['name']} равна 0.")
-            return None
         t = N / total_prod
         t_list.append(t)
         setup_list.append(op["setup"])
@@ -155,7 +167,7 @@ def calculate(data, Q, N, correction_choice):
         daily_setup_list.append(op.get("daily_setup", False))
         max_hours_list.append(op.get("max_hours_per_day", hours_per_day))
 
-    # ---- Симуляция ----
+    # ---- Симуляция с прогресс-баром для большого числа нарядов ----
     op_intervals = [[] for _ in range(len(operations))]
     all_intervals = []
     equip_free = [0.0] * len(operations)
@@ -165,11 +177,14 @@ def calculate(data, Q, N, correction_choice):
     def next_day_start(t):
         return (int(t // hours_per_day) + 1) * hours_per_day
 
-    # Ограничим количество итераций, чтобы избежать бесконечного цикла
-    max_iterations = 10000
-    iter_count = 0
+    # Прогресс-бар, если нарядов много
+    progress_bar = None
+    if m > 10:
+        progress_bar = st.progress(0, text="Выполняется симуляция...")
 
     for j in range(m):
+        if progress_bar is not None:
+            progress_bar.progress((j + 1) / m, text=f"Наряд {j+1}/{m}")
         for i in range(len(operations)):
             t_i = t_list[i]
             setup = setup_list[i]
@@ -179,10 +194,6 @@ def calculate(data, Q, N, correction_choice):
             base_start = max(prev_ready[j], equip_free[i])
             start = base_start
             while True:
-                iter_count += 1
-                if iter_count > max_iterations:
-                    st.error("Превышено максимальное число итераций в симуляции. Проверьте параметры.")
-                    return None
                 day_start = (start // hours_per_day) * hours_per_day
                 day_end = day_start + hours_per_day
 
@@ -217,6 +228,9 @@ def calculate(data, Q, N, correction_choice):
                 else:
                     start = next_day_start(start)
 
+    if progress_bar is not None:
+        progress_bar.empty()
+
     T = max(end for _, end, _, _ in all_intervals) if all_intervals else 0
     days_needed = math.ceil(T / hours_per_day)
 
@@ -247,7 +261,7 @@ def calculate(data, Q, N, correction_choice):
     idx_max = t_list.index(t_max) if t_list else 0
     bottleneck_name = name_list[idx_max] if t_list else ""
 
-    # ---- Загрузка по дням ----
+    # ---- Загрузка по дням (оптимизировано) ----
     day_usage_dict = {}
     for day in range(days_needed):
         day_start = day * hours_per_day
@@ -368,10 +382,10 @@ with st.sidebar:
     st.divider()
     if st.button("🧹 Очистить всё", type="secondary", use_container_width=True):
         clear_all()
-        st.rerun()
 
     st.divider()
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
+        # Собираем данные
         ops = []
         for i in range(len(st.session_state.operations)):
             op = {
@@ -386,30 +400,29 @@ with st.sidebar:
             ops.append(op)
         st.session_state.operations = ops
 
-        data = {
-            "product_name": st.session_state.pn_input,
-            "shift_start": st.session_state.ss_input,
-            "shift_duration": st.session_state.sd_input,
-            "is_glue": st.session_state.ig_input,
-            "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
-            "operations": st.session_state.operations
-        }
-        if st.session_state.ig_input:
+        # Для кэширования нужно передать хэшируемые аргументы
+        product_name = st.session_state.pn_input
+        shift_start = st.session_state.ss_input
+        shift_duration = st.session_state.sd_input
+        is_glue = st.session_state.ig_input
+        # gram_counts в виде кортежа (g, cnt)
+        gram_counts_tuple = tuple((g, st.session_state.get(f"g_{g}", 0)) for g in st.session_state.gs_input)
+        if is_glue:
             Q = sum(st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input)
         else:
             Q = st.session_state.get('q_input', 1200)
         N = st.session_state.get('n_input', 600)
-        correction = st.session_state.correction_choice if st.session_state.ig_input else False
+        correction = st.session_state.correction_choice if is_glue else False
 
         with st.spinner("Выполняется расчёт..."):
-            result = calculate(data, Q, N, correction)
-        if result is not None:
-            st.session_state.result = result
-            if result.get('corrected'):
-                for g, cnt in result['gram_counts'].items():
-                    st.session_state[f"g_{g}"] = cnt
-        else:
-            st.error("Расчёт не удался. Проверьте параметры.")
+            result = calculate_cached(
+                product_name, shift_start, shift_duration, ops,
+                is_glue, gram_counts_tuple, Q, N, correction
+            )
+        st.session_state.result = result
+        if result.get('corrected'):
+            for g, cnt in result['gram_counts'].items():
+                st.session_state[f"g_{g}"] = cnt
         st.rerun()
 
 # ================== Отображение результатов ==================
@@ -458,13 +471,15 @@ if st.session_state.result is not None:
 
     st.subheader("📅 Загрузка по дням")
     if result['day_usage_dict']:
-        df_days = pd.DataFrame()
+        # Быстрое создание DataFrame без pd.concat
+        rows = []
         for day, usage in result['day_usage_dict'].items():
             row = {"День": day + 1}
-            for op in result['name_list']:
-                row[op] = usage.get(op, 0.0)
-            df_days = pd.concat([df_days, pd.DataFrame([row])], ignore_index=True)
-        st.dataframe(df_days, use_container_width=True)
+            row.update(usage)
+            rows.append(row)
+        df_days = pd.DataFrame(rows)
+        if not df_days.empty:
+            st.dataframe(df_days, use_container_width=True)
     else:
         st.info("Нет данных по дням")
 

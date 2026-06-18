@@ -83,26 +83,7 @@ def clear_all():
     st.session_state.correction_choice = False
     st.rerun()
 
-# ================== Функция расчёта с кэшированием ==================
-@st.cache_data(ttl=3600, show_spinner=False)
-def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue, gram_counts_tuple, Q, N, correction_choice):
-    """
-    Кэшируемая версия расчёта. Все аргументы должны быть хэшируемыми.
-    gram_counts передаётся как кортеж (g, cnt) для хэширования.
-    """
-    # Преобразуем gram_counts обратно в словарь
-    gram_counts = dict(gram_counts_tuple)
-    data = {
-        "product_name": product_name,
-        "shift_start": shift_start,
-        "shift_duration": shift_duration,
-        "operations": operations,
-        "is_glue": is_glue,
-        "gram_counts": gram_counts
-    }
-    # Вызываем основную функцию расчёта (без кэша)
-    return calculate(data, Q, N, correction_choice)
-
+# ================== Функция расчёта (без кэширования) ==================
 def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
     shift_start = data.get('shift_start', 8.0)
@@ -167,7 +148,7 @@ def calculate(data, Q, N, correction_choice):
         daily_setup_list.append(op.get("daily_setup", False))
         max_hours_list.append(op.get("max_hours_per_day", hours_per_day))
 
-    # ---- Симуляция с прогресс-баром для большого числа нарядов ----
+    # ---- Симуляция с прогресс-баром ----
     op_intervals = [[] for _ in range(len(operations))]
     all_intervals = []
     equip_free = [0.0] * len(operations)
@@ -177,7 +158,6 @@ def calculate(data, Q, N, correction_choice):
     def next_day_start(t):
         return (int(t // hours_per_day) + 1) * hours_per_day
 
-    # Прогресс-бар, если нарядов много
     progress_bar = None
     if m > 10:
         progress_bar = st.progress(0, text="Выполняется симуляция...")
@@ -385,7 +365,6 @@ with st.sidebar:
 
     st.divider()
     if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
-        # Собираем данные
         ops = []
         for i in range(len(st.session_state.operations)):
             op = {
@@ -400,25 +379,23 @@ with st.sidebar:
             ops.append(op)
         st.session_state.operations = ops
 
-        # Для кэширования нужно передать хэшируемые аргументы
-        product_name = st.session_state.pn_input
-        shift_start = st.session_state.ss_input
-        shift_duration = st.session_state.sd_input
-        is_glue = st.session_state.ig_input
-        # gram_counts в виде кортежа (g, cnt)
-        gram_counts_tuple = tuple((g, st.session_state.get(f"g_{g}", 0)) for g in st.session_state.gs_input)
-        if is_glue:
+        data = {
+            "product_name": st.session_state.pn_input,
+            "shift_start": st.session_state.ss_input,
+            "shift_duration": st.session_state.sd_input,
+            "is_glue": st.session_state.ig_input,
+            "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
+            "operations": st.session_state.operations
+        }
+        if st.session_state.ig_input:
             Q = sum(st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input)
         else:
             Q = st.session_state.get('q_input', 1200)
         N = st.session_state.get('n_input', 600)
-        correction = st.session_state.correction_choice if is_glue else False
+        correction = st.session_state.correction_choice if st.session_state.ig_input else False
 
         with st.spinner("Выполняется расчёт..."):
-            result = calculate_cached(
-                product_name, shift_start, shift_duration, ops,
-                is_glue, gram_counts_tuple, Q, N, correction
-            )
+            result = calculate(data, Q, N, correction)
         st.session_state.result = result
         if result.get('corrected'):
             for g, cnt in result['gram_counts'].items():
@@ -471,7 +448,6 @@ if st.session_state.result is not None:
 
     st.subheader("📅 Загрузка по дням")
     if result['day_usage_dict']:
-        # Быстрое создание DataFrame без pd.concat
         rows = []
         for day, usage in result['day_usage_dict'].items():
             row = {"День": day + 1}

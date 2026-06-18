@@ -480,83 +480,89 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ================== ДИАГРАММА ГАНТА ==================
+    # ================== ДИАГРАММА ГАНТА (px.timeline) ==================
     st.subheader("📈 Диаграмма Ганта")
-    st.write("all_intervals:")
-    st.write(result['all_intervals'])
     if result['all_intervals']:
-        hours_per_day = result['hours_per_day']
-
-        ops_dict = {}
+        # --- Преобразуем all_intervals в DataFrame ---
+        rows = []
         for start, end, label, color in result['all_intervals']:
             if end <= start:
                 continue
             if label.startswith("Наладка"):
                 operation = label.replace("Наладка ", "").strip()
+                group = "Наладка"
             else:
                 if " (нар." in label:
                     operation = label.split(" (нар.")[0].strip()
                 else:
                     operation = label.strip()
-            day = int(start // hours_per_day)
-            start_in_day = start - day * hours_per_day
-            duration_days = (end - start) / hours_per_day
-
-            if operation not in ops_dict:
-                ops_dict[operation] = []
-            ops_dict[operation].append({
-                'day': day,
-                'start_in_day': start_in_day,
-                'duration_days': duration_days,
-                'color': color,
-                'desc': label
+                group = operation
+            rows.append({
+                "Операция": operation,
+                "Начало": start,
+                "Окончание": end,
+                "Группа": group,
+                "Описание": label,
+                "Длительность (ч)": end - start
             })
+        df_gantt = pd.DataFrame(rows)
 
-        if not ops_dict:
+        if df_gantt.empty:
             st.warning("Нет данных для отображения")
         else:
-            fig = go.Figure()
+            # --- Цвета для операций ---
             op_list = result['name_list']
             palette = px.colors.qualitative.Plotly
-            op_colors = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
-            op_colors["Наладка"] = "gray"
+            color_map = {op: palette[i % len(palette)] for i, op in enumerate(op_list)}
+            color_map["Наладка"] = "gray"
 
-            for op, segments in ops_dict.items():
-                for seg in segments:
-                    x_start = seg['day'] + seg['start_in_day'] / hours_per_day
-                    fig.add_trace(go.Bar(
-                        x=[x_start],
-                        y=[op],
-                        width=[seg['duration_days']],
-                        orientation='h',
-                        marker_color=seg['color'],
-                        hovertemplate=(
-                            f"<b>{seg['desc']}</b><br>"
-                            f"День: {seg['day']+1}<br>"
-                            f"Начало в день: {seg['start_in_day']:.2f} ч<br>"
-                            f"Длительность: {seg['duration_days']:.2f} дн<extra></extra>"
-                        ),
-                        showlegend=False
-                    ))
+            # --- Строим диаграмму ---
+            fig = px.timeline(
+                df_gantt,
+                x_start="Начало",
+                x_end="Окончание",
+                y="Операция",
+                color="Группа",
+                color_discrete_map=color_map,
+                hover_name="Описание",
+                hover_data={
+                    "Начало": True,
+                    "Окончание": True,
+                    "Группа": False,
+                    "Длительность (ч)": True,
+                    "Описание": False,
+                },
+                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
+                labels={"Операция": "Операция"}
+            )
 
+            # --- Порядок операций на оси Y ---
             fig.update_yaxes(
                 autorange="reversed",
                 categoryorder='array',
                 categoryarray=op_list,
-                title_text="Операция"
-            )
-            max_day = max((seg['day'] for segs in ops_dict.values() for seg in segs), default=0)
-            fig.update_xaxes(
-                title_text="День",
-                tickvals=list(range(max_day + 2)),
-                ticktext=[f"День {i+1}" for i in range(max_day + 2)],
-                showgrid=True
+                title="Операция"
             )
 
-            finish_day = result['T'] / hours_per_day
-            fig.add_vline(x=finish_day, line_width=2, line_dash="dash", line_color="red")
+            # --- Ось X – в днях (целые числа) ---
+            # Мы хотим показывать "День 1", "День 2" и т.д.
+            # Для этого нужно определить максимальное значение по оси X
+            max_time = max(df_gantt["Окончание"].max(), result['T'])
+            hours_per_day = result['hours_per_day']
+            max_day = math.ceil(max_time / hours_per_day)
+            fig.update_xaxes(
+                title="День",
+                tickvals=[i * hours_per_day for i in range(max_day + 1)],
+                ticktext=[f"День {i+1}" for i in range(max_day + 1)],
+                showgrid=True,
+                rangeslider_visible=True
+            )
+
+            # --- Красная линия окончания заказа ---
+            finish_time = result['T']
+            fig.add_vline(x=finish_time, line_width=2, line_dash="dash", line_color="red")
             fig.add_annotation(
-                x=finish_day,
+                x=finish_time,
                 y=1,
                 yref="paper",
                 text=f"Конец заказа<br>{result['T']:.2f} ч",
@@ -567,13 +573,14 @@ if st.session_state.result is not None:
 
             fig.update_layout(
                 height=max(450, len(op_list) * 90),
-                title=f'Диаграмма Ганта для заказа {result["product_name"]} ({result["Q"]} шт)',
-                hoverlabel=dict(bgcolor="white", font_size=13),
-                barmode='overlay',
-                bargap=0.2
+                hoverlabel=dict(bgcolor="white", font_size=13)
             )
 
             st.plotly_chart(fig, use_container_width=True)
+
+            # --- Отладка (опционально) ---
+            with st.expander("🔍 Данные для Ганта (проверка)"):
+                st.dataframe(df_gantt)
     else:
         st.info("Нет данных для построения диаграммы")
 

@@ -19,7 +19,7 @@ defaults = {
     "gram_counts": {},
     "product_name": "",
     "shift_start": 8.0,
-    "shift_duration": 9.0,
+    "shift_duration": 8.0,
     "is_glue": False,
     "result": None,
     "template_name": "template",
@@ -27,7 +27,7 @@ defaults = {
     # Ключи виджетов
     "pn_input": "",
     "ss_input": 8.0,
-    "sd_input": 9.0,
+    "sd_input": 8.0,
     "ig_input": False,
     "gs_input": [],
     "q_input": 1200,
@@ -82,7 +82,7 @@ def clear_all():
     # Установить значения по умолчанию
     st.session_state.pn_input = ""
     st.session_state.ss_input = 8.0
-    st.session_state.sd_input = 9.0
+    st.session_state.sd_input = 8.0
     st.session_state.ig_input = False
     st.session_state.gs_input = []
     st.session_state.operations = []
@@ -94,7 +94,7 @@ def clear_all():
 def calculate(data, Q, N, correction_choice):
     product_name = data['product_name']
     shift_start = data.get('shift_start', 8.0)
-    shift_duration = data.get('shift_duration', 9.0)
+    shift_duration = data.get('shift_duration', 8.0)
     operations = data['operations']
     is_glue = data.get('is_glue', False)
     hours_per_day = shift_duration

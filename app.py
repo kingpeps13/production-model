@@ -342,8 +342,6 @@ with st.sidebar:
             st.number_input("Человек", min_value=1, step=1, value=op.get('people', 1), key=f"people_{i}")
             st.checkbox("Ежедневная наладка", value=op.get('daily_setup', False), key=f"daily_{i}")
             st.number_input("Макс. часов в день", min_value=1.0, step=0.5, value=op.get('max_hours_per_day', 8.0), key=f"maxh_{i}")
-            # Сохраняем изменения обратно в operations (это не обязательно, т.к. виджеты с key хранят значения отдельно)
-            # Но для чтения мы будем использовать session_state, а не op.
 
     # Кнопки управления операциями
     col1, col2 = st.columns(2)
@@ -357,10 +355,6 @@ with st.sidebar:
             st.rerun()
         else:
             st.warning("Нельзя удалить последнюю операцию")
-
-    # Чтобы изменения в виджетах операций сохранялись в session_state.operations,
-    # нужно при каждом изменении обновлять список. Но проще после нажатия "Рассчитать"
-    # собрать данные из session_state. Сделаем это в кнопке расчёта.
 
     st.divider()
 
@@ -545,10 +539,8 @@ if st.session_state.result is not None:
             )
 
             # --- Ось X – в днях (целые числа) ---
-            # Мы хотим показывать "День 1", "День 2" и т.д.
-            # Для этого нужно определить максимальное значение по оси X
-            max_time = max(df_gantt["Окончание"].max(), result['T'])
             hours_per_day = result['hours_per_day']
+            max_time = max(df_gantt["Окончание"].max(), result['T'])
             max_day = math.ceil(max_time / hours_per_day)
             fig.update_xaxes(
                 title="День",

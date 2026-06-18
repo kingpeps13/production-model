@@ -482,6 +482,8 @@ if st.session_state.result is not None:
 
     # ================== ДИАГРАММА ГАНТА ==================
     st.subheader("📈 Диаграмма Ганта")
+    st.write("all_intervals:")
+    st.write(result['all_intervals'])
     if result['all_intervals']:
         hours_per_day = result['hours_per_day']
 

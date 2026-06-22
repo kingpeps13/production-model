@@ -2,6 +2,7 @@ import streamlit as st
 import math
 import json
 import pandas as pd
+from datetime import datetime, timedelta, date
 import plotly.express as px
 import plotly.graph_objects as go
 import io
@@ -30,13 +31,14 @@ defaults = {
     "q_input": 1200,
     "n_input": 600,
     "template_name_input": "template",
-    "pending_template_content": None
+    "pending_template_content": None,
+    "start_date_input": date.today()   # новое: дата начала
 }
 for key, default in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ================== Шаблоны ==================
+# ================== Шаблоны (не менялись) ==================
 def template_to_json():
     data = {
         "product_name": st.session_state.pn_input,
@@ -46,7 +48,8 @@ def template_to_json():
         "grammovki": st.session_state.gs_input if st.session_state.ig_input else [],
         "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
-        "version": "1.5.0"
+        "start_date": st.session_state.start_date_input.isoformat(),  # сохраняем дату
+        "version": "1.6.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -61,12 +64,17 @@ def load_template_from_json(json_str):
     for g in [3, 5, 10]:
         st.session_state[f"g_{g}"] = gram_counts.get(g, 0)
     st.session_state.operations = data.get('operations', [])
+    if 'start_date' in data:
+        try:
+            st.session_state.start_date_input = date.fromisoformat(data['start_date'])
+        except:
+            pass
     st.session_state.result = None
 
 def clear_all():
     keys_to_clear = ['pn_input', 'ss_input', 'sd_input', 'ig_input', 'gs_input',
                      'q_input', 'n_input', 'operations', 'result', 'correction_choice',
-                     'pending_template_content']
+                     'pending_template_content', 'start_date_input']
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -78,19 +86,25 @@ def clear_all():
     st.session_state.operations = []
     st.session_state.result = None
     st.session_state.correction_choice = False
+    st.session_state.start_date_input = date.today()
     st.rerun()
 
-# ================== Расчёт с учётом типа операции ==================
+# ================== Расчёт (исправленная симуляция) ==================
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue, gram_counts_tuple, Q, N, correction_choice):
+def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue,
+                     gram_counts_tuple, Q, N, correction_choice, start_date_iso):
     gram_counts = dict(gram_counts_tuple)
+    start_date = date.fromisoformat(start_date_iso)
     return calculate(
         product_name, shift_start, shift_duration, operations,
-        is_glue, gram_counts, Q, N, correction_choice
+        is_glue, gram_counts, Q, N, correction_choice, start_date
     )
 
-def calculate(product_name, shift_start, shift_duration, operations, is_glue, gram_counts, Q, N, correction_choice):
+def calculate(product_name, shift_start, shift_duration, operations, is_glue,
+              gram_counts, Q, N, correction_choice, start_date):
     hours_per_day = shift_duration
+    # Базовое время старта: дата + время начала смены
+    base_datetime = datetime.combine(start_date, datetime.min.time()) + timedelta(hours=shift_start)
 
     # ---- Клей (без изменений) ----
     can_count_4kg = 0
@@ -106,7 +120,6 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         can_count_4kg = math.ceil(total_weight / 4000.0)
         rem4 = total_weight % 4000.0
         shortage_4kg = 0.0 if rem4 == 0 else 4000.0 - rem4
-
         can_count_1kg = math.ceil(total_weight / 1000.0)
         rem1 = total_weight % 1000.0
         shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
@@ -127,41 +140,40 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
             rem1 = total_weight % 1000.0
             shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
 
-    # ---- Подготовка операций: добавляем capacity ----
+    # ---- Подготовка операций ----
     for op in operations:
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
-        # НОВОЕ: определение ёмкости по типу операции
+        # Ёмкость: для ручных зависит от people, для машинных от equip
         if op.get('manual', False):
-            op['capacity'] = op['prod'] * op['people']     # ручная
+            op['capacity'] = op['prod'] * op['people']
         else:
-            op['capacity'] = op['prod'] * op.get('equip', 1)   # машинная
+            op['capacity'] = op['prod'] * op.get('equip', 1)
 
     m = math.ceil(Q / N)
 
-    # ---- Симуляция (устойчивая) ----
+    # ---- ИСПРАВЛЕННАЯ СИМУЛЯЦИЯ ----
     op_intervals = [[] for _ in range(len(operations))]
-    all_intervals = []
+    all_intervals = []          # здесь будут кортежи (start_h, end_h, label, color) в часах
     equip_free = [0.0] * len(operations)
     job_ready = [0.0] * m
     colors = px.colors.qualitative.Plotly * 10
 
     def next_day_start(t):
-        return (int(t // hours_per_day) + 1) * hours_per_day
+        """Начало следующего рабочего дня (в часах от старта)"""
+        return (int(t // 24) + 1) * 24
 
     progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
     MAX_ITERATIONS = 10000
-    total_ops = len(operations)
 
     for j in range(m):
         if progress_bar is not None:
             progress_bar.progress((j + 1) / m, text=f"Наряд {j+1}/{m}")
-        for i in range(total_ops):
-            op = operations[i]
+        for i, op in enumerate(operations):
             t_i = N / op['capacity']
             setup = op['setup']
             daily = op['daily_setup']
-            max_h = op['max_hours_per_day']
+            max_h = op['max_hours_per_day']   # лимит часов в день (обычно = shift_duration)
 
             base_start = max(job_ready[j], equip_free[i])
             start = base_start
@@ -170,14 +182,17 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
 
             while not placed and loop_guard < MAX_ITERATIONS:
                 loop_guard += 1
-                day_start = (start // hours_per_day) * hours_per_day
+                # Границы текущего рабочего дня: начало – ближайшее кратное 24
+                day_start = (int(start // 24)) * 24
                 day_end = day_start + hours_per_day
 
+                # Сколько уже занято в этом дне на данном оборудовании
                 used_in_day = 0.0
                 for (s, e) in op_intervals[i]:
                     if s < day_end and e > day_start:
                         used_in_day += (min(e, day_end) - max(s, day_start))
 
+                # Ежедневная наладка (если ещё не была в этом дне)
                 if daily:
                     setup_done = False
                     for (s, e) in op_intervals[i]:
@@ -202,8 +217,9 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                     job_ready[j] = end
                     placed = True
                 else:
+                    # Если операция длиннее лимита дня, размещаем целиком с предупреждением
                     if t_i > max_h:
-                        st.warning(f"Операция '{op['name']}' длиннее лимита дня. Будет размещена целиком.")
+                        st.warning(f"Операция '{op['name']}' длиннее лимита дня ({t_i:.2f} ч > {max_h} ч). Будет размещена полностью в одном дне.")
                         real_start = start
                         end = real_start + t_i
                         op_intervals[i].append((real_start, end))
@@ -212,18 +228,19 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                         job_ready[j] = end
                         placed = True
                     else:
-                        start = next_day_start(start)
+                        start = next_day_start(start)   # переход к началу следующего рабочего дня
+
             if not placed:
-                st.error(f"Не удалось разместить '{op['name']}' в наряде {j+1}.")
+                st.error(f"Не удалось разместить операцию '{op['name']}' для наряда {j+1}.")
                 break
 
     if progress_bar is not None:
         progress_bar.empty()
 
     T = max(end for _, end, _, _ in all_intervals) if all_intervals else 0
-    days_needed = math.ceil(T / hours_per_day)
+    days_needed = math.ceil(T / 24)   # теперь дни календарные
 
-    # ---- Трудоёмкость и итоги ----
+    # ---- Трудоёмкость ----
     total_labor = 0.0
     labor_details = []
     days_work_list = []
@@ -233,7 +250,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
     for i, op in enumerate(operations):
         days_set = set()
         for (s, e) in op_intervals[i]:
-            days_set.add(int(s // hours_per_day))
+            days_set.add(int(s // 24))   # номер дня (кратно 24)
         days_work = len(days_set)
         days_work_list.append(days_work)
 
@@ -246,7 +263,6 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         else:
             setup_total = op['setup']
         setup_total_list.append(setup_total)
-
         labor_i = op['people'] * (total_work + setup_total)
         total_labor += labor_i
         labor_details.append((op['name'], labor_i))
@@ -258,7 +274,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
     # Загрузка по дням
     day_usage_dict = {}
     for day in range(days_needed):
-        day_start = day * hours_per_day
+        day_start = day * 24
         day_end = day_start + hours_per_day
         day_usage = {}
         for i, op in enumerate(operations):
@@ -270,6 +286,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
                 day_usage[op['name']] = total_hours
         day_usage_dict[day] = day_usage
 
+    # Формируем результат (all_intervals в часах)
     return {
         'Q': Q, 'N': N, 'm': m, 'T': T, 'days_needed': days_needed,
         'total_labor': total_labor,
@@ -284,7 +301,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         'labor_details': labor_details,
         'bottleneck_name': bottleneck_name,
         't_max': t_max,
-        'all_intervals': all_intervals,
+        'all_intervals': all_intervals,            # часы от старта
         'day_usage_dict': day_usage_dict,
         'shift_start': shift_start,
         'hours_per_day': hours_per_day,
@@ -297,7 +314,8 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue, gr
         'shortage_1kg': shortage_1kg,
         'total_weight': total_weight,
         'gram_counts': gram_counts,
-        'corrected': corrected
+        'corrected': corrected,
+        'base_datetime': base_datetime   # для пересчёта в даты
     }
 
 # ================== ИНТЕРФЕЙС ==================
@@ -307,11 +325,12 @@ with tab1:
     col1, col2, col3 = st.columns(3)
     with col1:
         st.text_input("Наименование продукта", key='pn_input')
-        st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, step=0.5, key='ss_input')
+        st.date_input("Дата начала производства", key='start_date_input')
     with col2:
-        st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, step=0.5, key='sd_input')
+        st.number_input("Начало смены (ч)", min_value=0.0, max_value=23.0, step=0.5, key='ss_input')
         st.checkbox("Это клей?", key='ig_input')
     with col3:
+        st.number_input("Длительность смены (ч)", min_value=1.0, max_value=24.0, step=0.5, key='sd_input')
         if st.session_state.ig_input:
             st.subheader("🧴 Граммовки клея")
             all_gram = [3, 5, 10]
@@ -357,18 +376,16 @@ with tab2:
         with cols[2]:
             st.number_input("Наладка", min_value=0.0, step=0.05, value=op['setup'], key=f"setup_{i}", label_visibility="collapsed")
         with cols[3]:
-            # Поле оборудования скрывается для ручных операций
             if not st.session_state.get(f"manual_{i}", False):
                 st.number_input("Оборуд.", min_value=1, value=op.get('equip', 1), key=f"equip_{i}", label_visibility="collapsed")
             else:
-                st.markdown("—")  # прочерк вместо поля
+                st.markdown("—")
         with cols[4]:
             st.number_input("Людей", min_value=1, value=op.get('people', 1), key=f"people_{i}", label_visibility="collapsed")
         with cols[5]:
             st.checkbox("Ежедн.", value=op.get('daily_setup', False), key=f"daily_{i}", label_visibility="collapsed")
         with cols[6]:
             is_manual = st.checkbox("Ручная", value=op.get('manual', False), key=f"manual_{i}", label_visibility="collapsed")
-            # сразу обновляем состояние операции, чтобы скрывать/показывать оборудование при следующем rerun
             st.session_state.operations[i]['manual'] = is_manual
 
     btn_col1, btn_col2 = st.columns(2)
@@ -382,7 +399,7 @@ with tab2:
                 "people": 1,
                 "daily_setup": False,
                 "max_hours_per_day": st.session_state.sd_input,
-                "manual": False  # НОВОЕ
+                "manual": False
             }
             st.session_state.operations.append(new_op)
             st.rerun()
@@ -424,7 +441,7 @@ with tab3:
 # Кнопка расчёта
 st.divider()
 if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
-    # Собираем актуальное состояние операций
+    # Сбор операций
     ops = []
     for i in range(len(st.session_state.operations)):
         op = {
@@ -451,11 +468,12 @@ if st.button("🚀 Рассчитать", type="primary", use_container_width=Tr
         Q = st.session_state.get('q_input', 1200)
     N = st.session_state.get('n_input', 600)
     correction = st.session_state.correction_choice if is_glue else False
+    start_date_iso = st.session_state.start_date_input.isoformat()
 
     with st.spinner("Выполняется расчёт..."):
         result = calculate_cached(
             product_name, shift_start, shift_duration, ops,
-            is_glue, gram_counts_tuple, Q, N, correction
+            is_glue, gram_counts_tuple, Q, N, correction, start_date_iso
         )
     st.session_state.result = result
     if result.get('corrected'):
@@ -468,7 +486,7 @@ if st.session_state.result is not None:
     result = st.session_state.result
     st.success("✅ Расчёт завершён!")
 
-    # Диагностика (для уверенности)
+    # Диагностика
     with st.expander("🔧 Отладка интервалов"):
         st.write(f"Всего интервалов: {len(result['all_intervals'])}")
         unique_ops = set()
@@ -532,31 +550,33 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ========== ДИАГРАММА ГАНТА ==========
+    # ========== ДИАГРАММА ГАНТА С РЕАЛЬНЫМИ ДАТАМИ ==========
     st.subheader("📈 Диаграмма Ганта")
-    if result['all_intervals']:
-        rows = []
-        for start, end, label, color in result['all_intervals']:
-            if end <= start:
+    all_intervals_hours = result['all_intervals']
+    if all_intervals_hours:
+        base_dt = result['base_datetime']
+        df_rows = []
+        for start_h, end_h, label, color in all_intervals_hours:
+            if end_h <= start_h:
                 continue
+            # Конвертация часов в datetime
+            start_dt = base_dt + timedelta(hours=start_h)
+            end_dt = base_dt + timedelta(hours=end_h)
             if label.startswith("Наладка"):
                 operation = label.replace("Наладка ", "").strip()
                 group = "Наладка"
             else:
-                if " (нар." in label:
-                    operation = label.split(" (нар.")[0].strip()
-                else:
-                    operation = label.strip()
+                operation = label.split(" (нар.")[0].strip() if " (нар." in label else label.strip()
                 group = operation
-            rows.append({
+            df_rows.append({
                 "Операция": operation,
-                "Начало": start,
-                "Окончание": end,
+                "Начало": start_dt,
+                "Окончание": end_dt,
                 "Группа": group,
                 "Описание": label,
-                "Длительность (ч)": end - start
+                "Длительность (ч)": end_h - start_h
             })
-        df_gantt = pd.DataFrame(rows)
+        df_gantt = pd.DataFrame(df_rows)
 
         if not df_gantt.empty:
             op_list = result['name_list']
@@ -590,21 +610,18 @@ if st.session_state.result is not None:
                 title="Операция"
             )
 
-            hours_per_day = result['hours_per_day']
-            max_time = max(df_gantt["Окончание"].max(), result['T'])
-            max_day = math.ceil(max_time / hours_per_day)
+            # Ось X – реальное время
             fig.update_xaxes(
-                title="День",
-                tickvals=[i * hours_per_day for i in range(max_day + 1)],
-                ticktext=[f"День {i+1}" for i in range(max_day + 1)],
+                title="Дата и время",
+                tickformat="%d.%m %H:%M",
                 showgrid=True,
                 rangeslider_visible=True
             )
 
-            finish_time = result['T']
-            fig.add_vline(x=finish_time, line_width=2, line_dash="dash", line_color="red")
+            finish_dt = base_dt + timedelta(hours=result['T'])
+            fig.add_vline(x=finish_dt, line_width=2, line_dash="dash", line_color="red")
             fig.add_annotation(
-                x=finish_time,
+                x=finish_dt,
                 y=1,
                 yref="paper",
                 text=f"Конец заказа<br>{result['T']:.2f} ч",
@@ -620,14 +637,20 @@ if st.session_state.result is not None:
 
             st.plotly_chart(fig, use_container_width=True)
 
+            # Счётчик объектов
+            total_objs = len(df_gantt)
+            ops_objs = sum(1 for _, _, label, _ in all_intervals_hours if not label.startswith("Наладка"))
+            st.metric("🧩 Объектов на диаграмме", total_objs)
+            st.caption(f"Из них: {ops_objs} операций, {total_objs - ops_objs} наладок")
+
             with st.expander("🔍 Данные для Ганта (проверка)"):
                 st.dataframe(df_gantt)
         else:
-            st.warning("Нет данных для отображения")
+            st.warning("Нет данных для отображения (все интервалы нулевой длины)")
     else:
         st.info("Нет данных для построения диаграммы")
 
-    # ================== Экспорт в Excel ==================
+    # ================== Экспорт в Excel (без изменений) ==================
     st.subheader("💾 Экспорт")
     try:
         wb = Workbook()

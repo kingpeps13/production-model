@@ -32,13 +32,13 @@ defaults = {
     "n_input": 600,
     "template_name_input": "template",
     "pending_template_content": None,
-    "start_date_input": date.today()   # новое: дата начала
+    "start_date_input": date.today()
 }
 for key, default in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ================== Шаблоны (не менялись) ==================
+# ================== Шаблоны ==================
 def template_to_json():
     data = {
         "product_name": st.session_state.pn_input,
@@ -48,8 +48,8 @@ def template_to_json():
         "grammovki": st.session_state.gs_input if st.session_state.ig_input else [],
         "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
-        "start_date": st.session_state.start_date_input.isoformat(),  # сохраняем дату
-        "version": "1.6.0"
+        "start_date": st.session_state.start_date_input.isoformat(),
+        "version": "2.0.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -89,7 +89,7 @@ def clear_all():
     st.session_state.start_date_input = date.today()
     st.rerun()
 
-# ================== Расчёт (исправленная симуляция) ==================
+# ================== Расчёт (новая симуляция) ==================
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue,
                      gram_counts_tuple, Q, N, correction_choice, start_date_iso):
@@ -103,7 +103,6 @@ def calculate_cached(product_name, shift_start, shift_duration, operations, is_g
 def calculate(product_name, shift_start, shift_duration, operations, is_glue,
               gram_counts, Q, N, correction_choice, start_date):
     hours_per_day = shift_duration
-    # Базовое время старта: дата + время начала смены
     base_datetime = datetime.combine(start_date, datetime.min.time()) + timedelta(hours=shift_start)
 
     # ---- Клей (без изменений) ----
@@ -123,7 +122,6 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         can_count_1kg = math.ceil(total_weight / 1000.0)
         rem1 = total_weight % 1000.0
         shortage_1kg = 0.0 if rem1 == 0 else 1000.0 - rem1
-
         if rem4 != 0 and correction_choice:
             need_weight = shortage_4kg
             max_g = max(gram_counts.keys(), key=lambda g: weight_map.get(g, 0))
@@ -144,120 +142,242 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
     for op in operations:
         op.setdefault('daily_setup', False)
         op.setdefault('max_hours_per_day', hours_per_day)
-        # Ёмкость: для ручных зависит от people, для машинных от equip
         if op.get('manual', False):
             op['capacity'] = op['prod'] * op['people']
         else:
             op['capacity'] = op['prod'] * op.get('equip', 1)
+        # минимальное количество нарядов для запуска (по умолчанию 1)
+        op.setdefault('min_batch', 1)
 
-    m = math.ceil(Q / N)
+    m = math.ceil(Q / N)  # количество нарядов
+    t_per_job = [N / op['capacity'] for op in operations]  # время на один наряд
 
-    # ---- ИСПРАВЛЕННАЯ СИМУЛЯЦИЯ ----
-    op_intervals = [[] for _ in range(len(operations))]
-    all_intervals = []          # здесь будут кортежи (start_h, end_h, label, color) в часах
+    # Инициализация состояния симуляции
+    # Для каждой операции: очередь нарядов (индексы), ожидающих обработки
+    queue = [[] for _ in range(len(operations))]
+    # Время, когда наряд завершил предыдущую операцию (для операции 0 = 0)
+    ready_times = [0.0] * m
+    # Время освобождения оборудования
     equip_free = [0.0] * len(operations)
-    job_ready = [0.0] * m
+    # Список интервалов для каждой операции (для статистики)
+    op_intervals = [[] for _ in range(len(operations))]
+    # Общий список интервалов для Ганта (start_h, end_h, label, color)
+    all_intervals = []
     colors = px.colors.qualitative.Plotly * 10
 
-    def next_day_start(t):
-        """Начало следующего рабочего дня (в часах от старта)"""
-        return (int(t // 24) + 1) * 24
+    # Вспомогательная функция: разместить работу на операции i с учётом прерываний по дням
+    def place_work(i, start_time, work_hours, labels, daily_setup, max_hours):
+        """
+        Размещает работу длительностью work_hours на операции i начиная с start_time.
+        Возвращает время окончания.
+        labels – список меток для отрезков (если None, не добавляет в all_intervals).
+        daily_setup, max_hours – свойства операции.
+        """
+        remaining = work_hours
+        current_start = start_time
+        # Цикл по дням, пока не исчерпаем работу
+        while remaining > 1e-9:
+            # Определяем границы текущего рабочего дня
+            day_start = (int(current_start // 24)) * 24
+            day_end = day_start + max_hours
+            # Если current_start выходит за day_end (например, из-за переноса), сдвигаемся на следующий день
+            if current_start >= day_end:
+                current_start = (int(current_start // 24) + 1) * 24
+                day_start = (int(current_start // 24)) * 24
+                day_end = day_start + max_hours
+            # Ежедневная наладка, если ещё не была в этом дне
+            if daily_setup:
+                # Проверяем, была ли уже наладка в этом дне
+                setup_done = False
+                for s, e in op_intervals[i]:
+                    if s >= day_start and s < day_start + op['setup']:
+                        setup_done = True
+                        break
+                if not setup_done and op['setup'] > 0:
+                    setup_start = day_start
+                    setup_end = min(day_start + op['setup'], day_end)
+                    if setup_end > setup_start:
+                        op_intervals[i].append((setup_start, setup_end))
+                        all_intervals.append((setup_start, setup_end, f"Наладка {op['name']}", 'gray'))
+            # Доступное время в этом дне после учёта уже занятого
+            used = 0.0
+            for s, e in op_intervals[i]:
+                if s < day_end and e > day_start:
+                    used += min(e, day_end) - max(s, day_start)
+            available = max_hours - used
+            if available < 1e-9:
+                # Нет места, переходим на следующий день
+                current_start = (int(current_start // 24) + 1) * 24
+                continue
+            # Сколько можем сделать сейчас
+            chunk = min(remaining, available)
+            chunk_start = max(current_start, day_start)
+            # Корректируем start, если он был раньше начала дня
+            if chunk_start < day_start:
+                chunk_start = day_start
+            chunk_end = chunk_start + chunk
+            # Добавляем интервал
+            op_intervals[i].append((chunk_start, chunk_end))
+            # Создаём метку для этого куска (если переданы labels)
+            if labels is not None:
+                # labels – список кортежей (job_idx, label)
+                # Распределяем этот кусок по нарядам
+                # Для простоты будем считать, что каждый наряд – непрерывный кусок внутри chunk
+                # Но здесь мы знаем общую длительность работы для нескольких нарядов, поэтому
+                # мы не можем просто разрезать – нужно знать, как они идут.
+                # Вместо этого labels должен быть списком длительностей с метками.
+                # Переделаем вызов place_work для batch: будем передавать список длительностей и меток
+                pass  # обработаем в специальной функции для batch
+            remaining -= chunk
+            current_start = chunk_end
+            # Если работа не закончена, следующий кусок начнётся с начала следующего дня
+            if remaining > 1e-9:
+                current_start = (int(current_start // 24) + 1) * 24
+        return current_start
 
-    progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
-    MAX_ITERATIONS = 10000
+    # Для удобства создадим функцию размещения batch с учётом меток нарядов
+    def place_batch(i, start_time, job_indices, daily_setup, max_hours):
+        """
+        Размещает batch из job_indices на операции i начиная с start_time.
+        Возвращает время окончания блока.
+        """
+        if not job_indices:
+            return start_time
+        t = t_per_job[i]
+        total_work = len(job_indices) * t
+        remaining = total_work
+        current_start = start_time
+        idx_in_batch = 0  # индекс в списке job_indices
+        # переменная для отслеживания текущего наряда и остатка его длительности
+        current_job_rem = t  # осталось выполнить в текущем наряде
+        current_job_idx = job_indices[idx_in_batch]
 
+        while remaining > 1e-9:
+            day_start = (int(current_start // 24)) * 24
+            day_end = day_start + max_hours
+            if current_start >= day_end:
+                current_start = (int(current_start // 24) + 1) * 24
+                day_start = (int(current_start // 24)) * 24
+                day_end = day_start + max_hours
+            # Ежедневная наладка (как раньше)
+            if daily_setup:
+                setup_done = False
+                for s, e in op_intervals[i]:
+                    if s >= day_start and s < day_start + operations[i]['setup']:
+                        setup_done = True
+                        break
+                if not setup_done and operations[i]['setup'] > 0:
+                    setup_start = day_start
+                    setup_end = min(day_start + operations[i]['setup'], day_end)
+                    if setup_end > setup_start:
+                        op_intervals[i].append((setup_start, setup_end))
+                        all_intervals.append((setup_start, setup_end, f"Наладка {operations[i]['name']}", 'gray'))
+            # Доступное время
+            used = 0.0
+            for s, e in op_intervals[i]:
+                if s < day_end and e > day_start:
+                    used += min(e, day_end) - max(s, day_start)
+            available = max_hours - used
+            if available < 1e-9:
+                current_start = (int(current_start // 24) + 1) * 24
+                continue
+            # Сколько можем сделать сейчас
+            chunk = min(remaining, available)
+            chunk_start = max(current_start, day_start)
+            if chunk_start < day_start:
+                chunk_start = day_start
+            chunk_end = chunk_start + chunk
+
+            # Теперь разрезаем этот chunk на интервалы по нарядам
+            time_cursor = chunk_start
+            while time_cursor < chunk_end and idx_in_batch < len(job_indices):
+                # сколько осталось сделать в текущем наряде
+                take = min(current_job_rem, chunk_end - time_cursor)
+                seg_start = time_cursor
+                seg_end = time_cursor + take
+                # добавляем интервал
+                op_intervals[i].append((seg_start, seg_end))
+                label = f"{operations[i]['name']} (нар.{current_job_idx+1})"
+                all_intervals.append((seg_start, seg_end, label, colors[i % len(colors)]))
+                current_job_rem -= take
+                time_cursor += take
+                if current_job_rem < 1e-9:
+                    # переходим к следующему наряду
+                    idx_in_batch += 1
+                    if idx_in_batch < len(job_indices):
+                        current_job_idx = job_indices[idx_in_batch]
+                        current_job_rem = t
+
+            remaining -= chunk
+            current_start = chunk_end
+            if remaining > 1e-9:
+                current_start = (int(current_start // 24) + 1) * 24
+        return current_start
+
+    # Основной цикл: проходим по операциям, накапливая очереди
+    # Для операции 0 начальная очередь – все наряды (ready_times = 0)
     for j in range(m):
-        if progress_bar is not None:
-            progress_bar.progress((j + 1) / m, text=f"Наряд {j+1}/{m}")
-        for i, op in enumerate(operations):
-            t_i = N / op['capacity']
-            setup = op['setup']
-            daily = op['daily_setup']
-            max_h = op['max_hours_per_day']   # лимит часов в день (обычно = shift_duration)
+        queue[0].append(j)
 
-            base_start = max(job_ready[j], equip_free[i])
-            start = base_start
-            placed = False
-            loop_guard = 0
+    # Прогресс-бар
+    progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
 
-            while not placed and loop_guard < MAX_ITERATIONS:
-                loop_guard += 1
-                # Границы текущего рабочего дня: начало – ближайшее кратное 24
-                day_start = (int(start // 24)) * 24
-                day_end = day_start + hours_per_day
+    # Обрабатываем операции последовательно (так как наряды проходят операцию за операцией)
+    for i, op in enumerate(operations):
+        min_batch = op.get('min_batch', 1)
+        # Пока очередь не пуста, запускаем batch, когда выполнено условие
+        while queue[i]:
+            # Проверяем, можно ли запустить: либо накопилось min_batch, либо все наряды уже в очереди (больше не поступит)
+            can_start = (len(queue[i]) >= min_batch) or (i == len(operations)-1 and len(queue[i]) > 0) or (i < len(operations)-1 and len(queue[i]) == m and min_batch <= m)
+            # Уточним: больше нарядов не поступит, если все наряды уже прошли предыдущую операцию.
+            # Это можно определить: для операции i > 0, все наряды завершили операцию i-1, когда ready_times для всех нарядов заполнены.
+            # Проще: если операция не первая и длина очереди равна m, то больше не прибудет.
+            if i > 0 and len(queue[i]) == m:
+                can_start = True
+            if i == 0 and len(queue[0]) == m:
+                can_start = True
 
-                # Сколько уже занято в этом дне на данном оборудовании
-                used_in_day = 0.0
-                for (s, e) in op_intervals[i]:
-                    if s < day_end and e > day_start:
-                        used_in_day += (min(e, day_end) - max(s, day_start))
+            if not can_start:
+                break  # ждём, пока накопятся (но в симуляции мы не можем просто выйти, надо продвигать время? Нет, очередь пополняется только при завершении предыдущей операции. Поскольку мы обрабатываем последовательно, накопление уже произошло в момент помещения в queue[i]. В этом цикле мы уже имеем все наряды, которые когда-либо придут. Так что условие can_start всегда должно выполняться после заполнения очереди. Но для надёжности оставим.)
 
-                # Ежедневная наладка (если ещё не была в этом дне)
-                if daily:
-                    setup_done = False
-                    for (s, e) in op_intervals[i]:
-                        if s >= day_start and s < day_start + setup:
-                            setup_done = True
-                            break
-                    if not setup_done:
-                        setup_start = day_start
-                        setup_end = min(day_start + setup, day_end)
-                        if setup_end > setup_start:
-                            op_intervals[i].append((setup_start, setup_end))
-                            all_intervals.append((setup_start, setup_end, f"Наладка {op['name']}", 'gray'))
-                            used_in_day += (setup_end - setup_start)
+            # Определяем время начала batch: максимум из equip_free[i] и максимальной готовности нарядов в batch
+            batch_indices = queue[i][:min(len(queue[i]), min_batch)] if can_start else []
+            if not batch_indices:
+                # Если по какой-то причине не можем начать, берём все наряды
+                batch_indices = queue[i][:]
+            # Для тех нарядов, что в batch, их готовность – ready_times[j] (для i=0 готовность 0)
+            start_candidates = [equip_free[i]] + [ready_times[j] for j in batch_indices]
+            batch_start = max(start_candidates)
 
-                free_in_day = max_h - used_in_day
-                if free_in_day >= t_i:
-                    real_start = start
-                    end = real_start + t_i
-                    op_intervals[i].append((real_start, end))
-                    all_intervals.append((real_start, end, f"{op['name']} (нар.{j+1})", colors[i % len(colors)]))
-                    equip_free[i] = end
-                    job_ready[j] = end
-                    placed = True
-                else:
-                    # Если операция длиннее лимита дня, размещаем целиком с предупреждением
-                    if t_i > max_h:
-                        st.warning(f"Операция '{op['name']}' длиннее лимита дня ({t_i:.2f} ч > {max_h} ч). Будет размещена полностью в одном дне.")
-                        real_start = start
-                        end = real_start + t_i
-                        op_intervals[i].append((real_start, end))
-                        all_intervals.append((real_start, end, f"{op['name']} (нар.{j+1})", colors[i % len(colors)]))
-                        equip_free[i] = end
-                        job_ready[j] = end
-                        placed = True
-                    else:
-                        start = next_day_start(start)   # переход к началу следующего рабочего дня
+            # Выполняем batch с прерываниями по дням
+            batch_end = place_batch(i, batch_start, batch_indices, op.get('daily_setup', False), op.get('max_hours_per_day', hours_per_day))
 
-            if not placed:
-                st.error(f"Не удалось разместить операцию '{op['name']}' для наряда {j+1}.")
-                break
+            # Обновляем оборудование
+            equip_free[i] = batch_end
+            # Обновляем ready_times для этих нарядов (для следующей операции)
+            for j in batch_indices:
+                ready_times[j] = batch_end  # наряд завершён одновременно для всех в конце batch (можно уточнить, но для последовательного прохождения операций достаточно)
+            # Удаляем обработанные наряды из очереди
+            queue[i] = queue[i][len(batch_indices):]
 
-    if progress_bar is not None:
+    if progress_bar:
         progress_bar.empty()
 
-    T = max(end for _, end, _, _ in all_intervals) if all_intervals else 0
-    days_needed = math.ceil(T / 24)   # теперь дни календарные
+    T = max(equip_free) if any(equip_free) else 0
+    days_needed = math.ceil(T / 24)
 
-    # ---- Трудоёмкость ----
-    total_labor = 0.0
-    labor_details = []
+    # Трудоёмкость и остальная статистика (как раньше)
     days_work_list = []
     setup_total_list = []
-    t_list = []
-
+    labor_details = []
+    total_labor = 0.0
     for i, op in enumerate(operations):
         days_set = set()
-        for (s, e) in op_intervals[i]:
-            days_set.add(int(s // 24))   # номер дня (кратно 24)
+        for s, e in op_intervals[i]:
+            days_set.add(int(s // 24))
         days_work = len(days_set)
         days_work_list.append(days_work)
-
-        t_i = N / op['capacity']
-        t_list.append(t_i)
-
-        total_work = m * t_i
+        total_work = m * t_per_job[i]
         if op.get('daily_setup', False):
             setup_total = op['setup'] * days_work
         else:
@@ -267,8 +387,8 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         total_labor += labor_i
         labor_details.append((op['name'], labor_i))
 
-    t_max = max(t_list) if t_list else 0
-    idx_max = t_list.index(t_max) if t_list else 0
+    t_max = max(t_per_job) if t_per_job else 0
+    idx_max = t_per_job.index(t_max) if t_per_job else 0
     bottleneck_name = operations[idx_max]['name'] if operations else ""
 
     # Загрузка по дням
@@ -279,19 +399,18 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         day_usage = {}
         for i, op in enumerate(operations):
             total_hours = 0.0
-            for (s, e) in op_intervals[i]:
+            for s, e in op_intervals[i]:
                 if s < day_end and e > day_start:
-                    total_hours += (min(e, day_end) - max(s, day_start))
+                    total_hours += min(e, day_end) - max(s, day_start)
             if total_hours > 0:
                 day_usage[op['name']] = total_hours
         day_usage_dict[day] = day_usage
 
-    # Формируем результат (all_intervals в часах)
     return {
         'Q': Q, 'N': N, 'm': m, 'T': T, 'days_needed': days_needed,
         'total_labor': total_labor,
         'name_list': [op['name'] for op in operations],
-        't_list': t_list,
+        't_list': t_per_job,
         'setup_list': [op['setup'] for op in operations],
         'people_list': [op['people'] for op in operations],
         'daily_setup_list': [op.get('daily_setup', False) for op in operations],
@@ -301,7 +420,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         'labor_details': labor_details,
         'bottleneck_name': bottleneck_name,
         't_max': t_max,
-        'all_intervals': all_intervals,            # часы от старта
+        'all_intervals': all_intervals,
         'day_usage_dict': day_usage_dict,
         'shift_start': shift_start,
         'hours_per_day': hours_per_day,
@@ -315,10 +434,10 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         'total_weight': total_weight,
         'gram_counts': gram_counts,
         'corrected': corrected,
-        'base_datetime': base_datetime   # для пересчёта в даты
+        'base_datetime': base_datetime
     }
 
-# ================== ИНТЕРФЕЙС ==================
+# ================== ИНТЕРФЕЙС (вкладки) ==================
 tab1, tab2, tab3 = st.tabs(["📋 Параметры заказа", "🔧 Операции", "💾 Шаблоны"])
 
 with tab1:
@@ -350,25 +469,19 @@ with tab2:
     if not st.session_state.operations:
         st.info("Добавьте хотя бы одну операцию")
 
-    # Заголовки столбцов
-    hcol1, hcol2, hcol3, hcol4, hcol5, hcol6, hcol7 = st.columns([2, 1, 1, 1, 1, 1, 1])
-    with hcol1:
-        st.markdown("**Название**")
-    with hcol2:
-        st.markdown("**Произв-ть (шт/ч)**")
-    with hcol3:
-        st.markdown("**Наладка (ч)**")
-    with hcol4:
-        st.markdown("**Оборуд.**")
-    with hcol5:
-        st.markdown("**Людей**")
-    with hcol6:
-        st.markdown("**Ежедн. нал.**")
-    with hcol7:
-        st.markdown("**Ручная**")
+    # Заголовки столбцов (добавлен столбец "Мин. нарядов")
+    hcols = st.columns([2, 1, 1, 1, 1, 1, 1, 0.8])
+    with hcols[0]: st.markdown("**Название**")
+    with hcols[1]: st.markdown("**Произв-ть (шт/ч)**")
+    with hcols[2]: st.markdown("**Наладка (ч)**")
+    with hcols[3]: st.markdown("**Оборуд.**")
+    with hcols[4]: st.markdown("**Людей**")
+    with hcols[5]: st.markdown("**Ежедн. нал.**")
+    with hcols[6]: st.markdown("**Ручная**")
+    with hcols[7]: st.markdown("**Мин. нар.**")
 
     for i, op in enumerate(st.session_state.operations):
-        cols = st.columns([2, 1, 1, 1, 1, 1, 1])
+        cols = st.columns([2, 1, 1, 1, 1, 1, 1, 0.8])
         with cols[0]:
             st.text_input("Название", value=op['name'], key=f"name_{i}", label_visibility="collapsed")
         with cols[1]:
@@ -387,6 +500,8 @@ with tab2:
         with cols[6]:
             is_manual = st.checkbox("Ручная", value=op.get('manual', False), key=f"manual_{i}", label_visibility="collapsed")
             st.session_state.operations[i]['manual'] = is_manual
+        with cols[7]:
+            st.number_input("Мин.нар.", min_value=1, value=op.get('min_batch', 1), key=f"minbatch_{i}", label_visibility="collapsed")
 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
@@ -399,7 +514,8 @@ with tab2:
                 "people": 1,
                 "daily_setup": False,
                 "max_hours_per_day": st.session_state.sd_input,
-                "manual": False
+                "manual": False,
+                "min_batch": 1
             }
             st.session_state.operations.append(new_op)
             st.rerun()
@@ -441,7 +557,7 @@ with tab3:
 # Кнопка расчёта
 st.divider()
 if st.button("🚀 Рассчитать", type="primary", use_container_width=True):
-    # Сбор операций
+    # Сбор операций с новым полем min_batch
     ops = []
     for i in range(len(st.session_state.operations)):
         op = {
@@ -452,7 +568,8 @@ if st.button("🚀 Рассчитать", type="primary", use_container_width=Tr
             "people": st.session_state.get(f"people_{i}", 1),
             "daily_setup": st.session_state.get(f"daily_{i}", False),
             "max_hours_per_day": st.session_state.get(f"maxh_{i}", st.session_state.sd_input),
-            "manual": st.session_state.get(f"manual_{i}", False)
+            "manual": st.session_state.get(f"manual_{i}", False),
+            "min_batch": st.session_state.get(f"minbatch_{i}", 1)
         }
         ops.append(op)
     st.session_state.operations = ops
@@ -481,12 +598,12 @@ if st.button("🚀 Рассчитать", type="primary", use_container_width=Tr
             st.session_state[f"g_{g}"] = cnt
     st.rerun()
 
-# ================== Отображение результатов ==================
+# ================== Отображение результатов (Ганта с датами, метрики) ==================
 if st.session_state.result is not None:
     result = st.session_state.result
     st.success("✅ Расчёт завершён!")
 
-    # Диагностика
+    # Отладка
     with st.expander("🔧 Отладка интервалов"):
         st.write(f"Всего интервалов: {len(result['all_intervals'])}")
         unique_ops = set()
@@ -550,7 +667,7 @@ if st.session_state.result is not None:
     else:
         st.info("Нет данных по дням")
 
-    # ========== ДИАГРАММА ГАНТА С РЕАЛЬНЫМИ ДАТАМИ ==========
+    # ========== ДИАГРАММА ГАНТА С ДАТАМИ ==========
     st.subheader("📈 Диаграмма Ганта")
     all_intervals_hours = result['all_intervals']
     if all_intervals_hours:
@@ -559,7 +676,6 @@ if st.session_state.result is not None:
         for start_h, end_h, label, color in all_intervals_hours:
             if end_h <= start_h:
                 continue
-            # Конвертация часов в datetime
             start_dt = base_dt + timedelta(hours=start_h)
             end_dt = base_dt + timedelta(hours=end_h)
             if label.startswith("Наладка"):
@@ -610,7 +726,6 @@ if st.session_state.result is not None:
                 title="Операция"
             )
 
-            # Ось X – реальное время
             fig.update_xaxes(
                 title="Дата и время",
                 tickformat="%d.%m %H:%M",
@@ -637,7 +752,6 @@ if st.session_state.result is not None:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Счётчик объектов
             total_objs = len(df_gantt)
             ops_objs = sum(1 for _, _, label, _ in all_intervals_hours if not label.startswith("Наладка"))
             st.metric("🧩 Объектов на диаграмме", total_objs)
@@ -646,11 +760,11 @@ if st.session_state.result is not None:
             with st.expander("🔍 Данные для Ганта (проверка)"):
                 st.dataframe(df_gantt)
         else:
-            st.warning("Нет данных для отображения (все интервалы нулевой длины)")
+            st.warning("Нет данных для отображения")
     else:
         st.info("Нет данных для построения диаграммы")
 
-    # ================== Экспорт в Excel (без изменений) ==================
+    # ================== Экспорт в Excel ==================
     st.subheader("💾 Экспорт")
     try:
         wb = Workbook()

@@ -4,7 +4,6 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta, date
 import plotly.express as px
-import plotly.graph_objects as go
 import io
 from openpyxl import Workbook
 
@@ -49,7 +48,7 @@ def template_to_json():
         "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
         "start_date": st.session_state.start_date_input.isoformat(),
-        "version": "2.1.0"
+        "version": "2.2.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -88,7 +87,7 @@ def clear_all():
     st.session_state.start_date_input = date.today()
     st.rerun()
 
-# ================== НОВАЯ СИМУЛЯЦИЯ ==================
+# ================== Расчёт (исправлено перекрытие наладки и операций) ==================
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue,
                      gram_counts_tuple, Q, N, correction_choice, start_date_iso):
@@ -155,92 +154,98 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
     all_intervals = []
     colors = px.colors.qualitative.Plotly * 10
 
-    # Очереди для каждой операции (списки индексов нарядов)
     queues = [[] for _ in range(len(operations))]
-    # Для операции 0 начальная очередь — все наряды
     queues[0] = list(range(m))
 
-    # Прогресс-бар
     progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
 
     def next_day_start(t):
-        """Начало следующего рабочего дня (в часах от старта)"""
         return (int(t // 24) + 1) * 24
 
-    # Обработка операций последовательно
+    # Обработка операций
     for i, op in enumerate(operations):
         min_batch = op.get('min_batch', 1)
-        # Пока в очереди есть наряды
         while queues[i]:
-            # Проверяем, можно ли запускать: либо накопилось min_batch, либо больше не поступит
             can_start = False
             if len(queues[i]) >= min_batch:
                 can_start = True
             elif i == len(operations) - 1 and len(queues[i]) > 0:
-                # последняя операция, больше ждать нечего
                 can_start = True
-            elif i > 0 and len(queues[i]) == m:  # все наряды уже здесь
+            elif i > 0 and len(queues[i]) == m:
                 can_start = True
             if not can_start:
-                # не можем начать, ждём (но в этой модели больше нарядов не прибудет, так что break)
                 break
 
-            # Выбираем batch
             batch_size = min(len(queues[i]), min_batch) if can_start else len(queues[i])
             if batch_size == 0:
                 break
-            # Сортируем batch по времени готовности (чтобы начать с самого раннего)
             batch_indices = sorted(queues[i][:batch_size], key=lambda j: ready_times[j])
-            queues[i] = queues[i][batch_size:]  # удаляем выбранные
+            queues[i] = queues[i][batch_size:]
 
-            # Начало batch: максимум из освобождения оборудования и готовности всех нарядов в batch
             start_time = max([equip_free[i]] + [ready_times[j] for j in batch_indices])
 
             # Последовательно обрабатываем наряды в batch
             for j in batch_indices:
                 t_i = t_per_job[i]
-                # Старт наряда — максимум из текущего освобождения и готовности именно этого наряда
                 job_start = max(equip_free[i], ready_times[j])
-                job_end = job_start
                 remaining = t_i
+                job_end = job_start
 
-                # Размещаем работу с прерываниями по дням
                 while remaining > 1e-9:
                     day_start = (int(job_end // 24)) * 24
                     day_end = day_start + op.get('max_hours_per_day', hours_per_day)
 
-                    # Ежедневная наладка (если ещё не была в этом дне)
+                    # Ежедневная наладка (если ещё не было в этом дне)
+                    setup_done = False
+                    setup_end = day_start  # по умолчанию наладки нет
                     if op.get('daily_setup', False):
-                        setup_done = False
                         for s, e in op_intervals[i]:
                             if s >= day_start and s < day_start + op['setup']:
                                 setup_done = True
+                                setup_end = day_start + op['setup']
                                 break
                         if not setup_done and op['setup'] > 0:
+                            # Добавляем наладку
                             setup_start = day_start
                             setup_end = min(day_start + op['setup'], day_end)
                             if setup_end > setup_start:
                                 op_intervals[i].append((setup_start, setup_end))
                                 all_intervals.append((setup_start, setup_end,
                                                        f"Наладка {op['name']}", 'gray'))
+                            # setup_done остаётся False, но интервал добавлен
+                            # Обновляем setup_end для дальнейшего сдвига
+                            setup_end = day_start + op['setup']
 
-                    # Доступное время в этом дне (после наладок и других работ)
+                    # Сдвигаем начало работы, если наладка ещё не закончилась
+                    current_start = max(job_end, day_start)
+                    if op.get('daily_setup', False) and current_start < setup_end:
+                        current_start = setup_end
+
+                    # Доступное время в этом дне после наладок и других работ
                     used = 0.0
                     for s, e in op_intervals[i]:
                         if s < day_end and e > day_start:
                             used += min(e, day_end) - max(s, day_start)
                     available = op.get('max_hours_per_day', hours_per_day) - used
 
-                    if available < 1e-9:
-                        # нет места, переходим на следующий день
+                    if available < 1e-9 or current_start >= day_end:
+                        # нет места или уже за пределами дня, переходим на следующий
                         job_end = next_day_start(job_end)
                         continue
 
+                    # Можно начинать работу
                     chunk = min(remaining, available)
-                    chunk_start = max(job_end, day_start)
+                    chunk_start = current_start
+                    # Убедимся, что chunk_start не раньше начала дня (уже обеспечено current_start >= day_start)
+                    if chunk_start < day_start:
+                        chunk_start = day_start
                     chunk_end = chunk_start + chunk
 
-                    # Добавляем интервал
+                    # Проверяем, что не вышли за day_end (из-за available должно быть <= day_end)
+                    if chunk_end > day_end:
+                        chunk_end = day_end
+                        chunk = chunk_end - chunk_start
+
                     op_intervals[i].append((chunk_start, chunk_end))
                     label = f"{op['name']} (нар.{j+1})"
                     all_intervals.append((chunk_start, chunk_end, label, colors[i % len(colors)]))
@@ -259,15 +264,13 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
                 if i + 1 < len(operations):
                     queues[i + 1].append(j)
 
-        # конец while queue[i]
-
         if progress_bar:
             progress_bar.progress((i + 1) / len(operations), text=f"Операция {i+1}/{len(operations)}")
 
     if progress_bar:
         progress_bar.empty()
 
-    # Итоговое время (максимальное окончание среди всех интервалов)
+    # Итоговое время
     T = max((end for _, end, _, _ in all_intervals), default=0.0)
     days_needed = math.ceil(T / 24)
 

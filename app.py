@@ -219,36 +219,54 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
                 current = (int(current // 24) + 1) * 24
         return current
 
-    # Основной цикл событий
-    t = 0.0
-    max_iter = 100000
-    iter_count = 0
-    progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
+# Вместо сложного условия can_start и цикла while с проверками:
+# Упрощённый цикл событий
+t = 0.0
+max_iter = 100000
+iter_count = 0
+progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
 
-    while finished_jobs[-1] < m and iter_count < max_iter:
-        iter_count += 1
-        # Ищем операцию, которая может начать обработку
-        started = False
-        for i, op in enumerate(operations):
-            # Условия старта:
-            # - оборудование свободно (eq_free_time[i] <= t)
-            # - в очереди есть наряды
-            if eq_free_time[i] > t or not queues[i]:
-                continue
-            # Проверяем, достаточно ли нарядов для запуска min_batch
+while finished_jobs[-1] < m and iter_count < max_iter:
+    iter_count += 1
+    started = False
+    for i, op in enumerate(operations):
+        # Запускаем, если оборудование свободно и есть наряды в очереди
+        if eq_free_time[i] <= t and queues[i]:
+            # Размер batch: не более min_batch, но и не более того, что есть
             min_b = op.get('min_batch', 1)
-            can_start = False
-            if len(queues[i]) >= min_b:
-                can_start = True
-            # Если все наряды уже поступили (total_arrived[i] == m) и очередь не пуста, можно начинать с любым остатком
-            if total_arrived[i] == m and len(queues[i]) > 0:
-                can_start = True
-            # Для последней операции можно начинать, даже если min_batch не достигнут, но все наряды уже пришли (total_arrived == m)
-            if i == len(operations)-1 and total_arrived[i] == m and len(queues[i]) > 0:
-                can_start = True
+            batch_size = min(len(queues[i]), min_b)
+            batch_indices = sorted(queues[i][:batch_size], key=lambda j: ready[i][j])
+            queues[i] = queues[i][batch_size:]
 
-            if not can_start:
-                continue
+            start_t = max(t, max(ready[i][j] for j in batch_indices), eq_free_time[i])
+            for j in batch_indices:
+                start_t = max(start_t, ready[i][j])
+                end_t = schedule_job(i, j, start_t)
+                if i + 1 < len(operations):
+                    ready[i+1][j] = end_t
+                    queues[i+1].append(j)
+                    total_arrived[i+1] += 1
+                start_t = end_t
+                finished_jobs[i] += 1
+            eq_free_time[i] = end_t
+            started = True
+            break   # на одной итерации запускаем одну операцию (можно убрать break для параллельности, но с ним проще)
+    if not started:
+        # продвигаем время к ближайшему освобождению или готовности наряда
+        next_t = float('inf')
+        for i in range(len(operations)):
+            if eq_free_time[i] > t:
+                next_t = min(next_t, eq_free_time[i])
+            if queues[i]:
+                min_ready = min(ready[i][j] for j in queues[i])
+                if min_ready > t:
+                    next_t = min(next_t, min_ready)
+        if next_t == float('inf'):
+            break
+        t = next_t
+    # прогресс-бар
+    if progress_bar and iter_count % 10 == 0:
+        progress_bar.progress(min(finished_jobs[-1] / m, 1.0), text=f"Обработано {finished_jobs[-1]}/{m} нарядов")
 
             # Определяем размер batch
             batch_size = min(len(queues[i]), min_b) if can_start and total_arrived[i] != m else len(queues[i])

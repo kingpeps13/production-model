@@ -48,7 +48,7 @@ def template_to_json():
         "gram_counts": {g: st.session_state.get(f"g_{g}", 0) for g in st.session_state.gs_input},
         "operations": st.session_state.operations,
         "start_date": st.session_state.start_date_input.isoformat(),
-        "version": "2.3.0"
+        "version": "2.4.0"
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -87,7 +87,7 @@ def clear_all():
     st.session_state.start_date_input = date.today()
     st.rerun()
 
-# ================== НОВАЯ СИМУЛЯЦИЯ (параллельная, с правильным min_batch) ==================
+# ================== НОВАЯ СИМУЛЯЦИЯ (v2.4.0 – без ожидания накопления) ==================
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_cached(product_name, shift_start, shift_duration, operations, is_glue,
                      gram_counts_tuple, Q, N, correction_choice, start_date_iso):
@@ -147,30 +147,22 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
     m = math.ceil(Q / N)
     t_per_job = [N / op['capacity'] for op in operations]
 
-    # Состояния для каждой операции
-    eq_free_time = [0.0] * len(operations)          # время освобождения оборудования
-    queues = [[] for _ in range(len(operations))]   # очереди ожидающих нарядов (индексы)
-    intervals = [[] for _ in range(len(operations))] # для каждой операции храним (start, end)
-    all_intervals = []                               # общий список (start_h, end_h, label, color)
+    # Состояния
+    eq_free_time = [0.0] * len(operations)
+    queues = [[] for _ in range(len(operations))]
+    intervals = [[] for _ in range(len(operations))]
+    all_intervals = []
     colors = px.colors.qualitative.Plotly * 10
 
-    # Время готовности каждого наряда к операции i (изначально 0 для операции 0)
-    # ready[i][j] - время, когда наряд j доступен для операции i
     ready = [ [0.0]*m for _ in range(len(operations)) ]
-    # Для операции 0 все наряды готовы в 0
     queues[0] = list(range(m))
 
-    # Количество нарядов, поступивших в очередь операции i (включая уже обработанные)
     total_arrived = [0] * len(operations)
     total_arrived[0] = m
 
-    # Флаг завершения операций
-    finished_jobs = [0] * len(operations)   # сколько нарядов уже обработано на операции i
+    finished_jobs = [0] * len(operations)
 
-    # Вспомогательная функция размещения наряда с учётом дней и наладок
     def schedule_job(op_idx, job_idx, start_time):
-        """Размещает один наряд job_idx на операции op_idx начиная со start_time.
-        Возвращает время окончания, обновляет intervals и all_intervals."""
         op = operations[op_idx]
         t_i = t_per_job[op_idx]
         remaining = t_i
@@ -178,9 +170,7 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
         while remaining > 1e-9:
             day_start = (int(current // 24)) * 24
             day_end = day_start + op.get('max_hours_per_day', hours_per_day)
-            # Ежедневная наладка
             if op.get('daily_setup', False):
-                # проверяем, есть ли уже наладка в этом дне на этом оборудовании
                 setup_done = False
                 for s, e in intervals[op_idx]:
                     if s >= day_start and s < day_start + op['setup']:
@@ -193,7 +183,6 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
                         intervals[op_idx].append((setup_start, setup_end))
                         all_intervals.append((setup_start, setup_end,
                                                f"Наладка {op['name']}", 'gray'))
-            # Доступное время после уже запланированных работ
             used = 0.0
             for s, e in intervals[op_idx]:
                 if s < day_end and e > day_start:
@@ -219,100 +208,54 @@ def calculate(product_name, shift_start, shift_duration, operations, is_glue,
                 current = (int(current // 24) + 1) * 24
         return current
 
-# Вместо сложного условия can_start и цикла while с проверками:
-# Упрощённый цикл событий
-t = 0.0
-max_iter = 100000
-iter_count = 0
-progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
+    # Основной цикл событий (исправлен)
+    t = 0.0
+    max_iter = 100000
+    iter_count = 0
+    progress_bar = st.progress(0, text="Симуляция...") if m > 5 else None
 
-while finished_jobs[-1] < m and iter_count < max_iter:
-    iter_count += 1
-    started = False
-    for i, op in enumerate(operations):
-        # Запускаем, если оборудование свободно и есть наряды в очереди
-        if eq_free_time[i] <= t and queues[i]:
-            # Размер batch: не более min_batch, но и не более того, что есть
-            min_b = op.get('min_batch', 1)
-            batch_size = min(len(queues[i]), min_b)
-            batch_indices = sorted(queues[i][:batch_size], key=lambda j: ready[i][j])
-            queues[i] = queues[i][batch_size:]
+    while finished_jobs[-1] < m and iter_count < max_iter:
+        iter_count += 1
+        started = False
+        for i, op in enumerate(operations):
+            if eq_free_time[i] <= t and queues[i]:
+                min_b = op.get('min_batch', 1)
+                # Берём не более min_batch, но сколько есть в очереди
+                batch_size = min(len(queues[i]), min_b)
+                batch_indices = sorted(queues[i][:batch_size], key=lambda j: ready[i][j])
+                queues[i] = queues[i][batch_size:]
 
-            start_t = max(t, max(ready[i][j] for j in batch_indices), eq_free_time[i])
-            for j in batch_indices:
-                start_t = max(start_t, ready[i][j])
-                end_t = schedule_job(i, j, start_t)
-                if i + 1 < len(operations):
-                    ready[i+1][j] = end_t
-                    queues[i+1].append(j)
-                    total_arrived[i+1] += 1
-                start_t = end_t
-                finished_jobs[i] += 1
-            eq_free_time[i] = end_t
-            started = True
-            break   # на одной итерации запускаем одну операцию (можно убрать break для параллельности, но с ним проще)
-    if not started:
-        # продвигаем время к ближайшему освобождению или готовности наряда
-        next_t = float('inf')
-        for i in range(len(operations)):
-            if eq_free_time[i] > t:
-                next_t = min(next_t, eq_free_time[i])
-            if queues[i]:
-                min_ready = min(ready[i][j] for j in queues[i])
-                if min_ready > t:
-                    next_t = min(next_t, min_ready)
-        if next_t == float('inf'):
-            break
-        t = next_t
-    # прогресс-бар
-    if progress_bar and iter_count % 10 == 0:
-        progress_bar.progress(min(finished_jobs[-1] / m, 1.0), text=f"Обработано {finished_jobs[-1]}/{m} нарядов")
-
-            # Определяем размер batch
-            batch_size = min(len(queues[i]), min_b) if can_start and total_arrived[i] != m else len(queues[i])
-            # Сортируем ожидающие наряды по времени готовности
-            batch_indices = sorted(queues[i][:batch_size], key=lambda j: ready[i][j])
-            queues[i] = queues[i][batch_size:]   # убираем из очереди
-
-            # Время начала batch: max(t, max(ready), eq_free_time)
-            start_t = max(t, max(ready[i][j] for j in batch_indices), eq_free_time[i])
-            # Обрабатываем наряды последовательно
-            for j in batch_indices:
-                start_t = max(start_t, ready[i][j])
-                end_t = schedule_job(i, j, start_t)
-                # Обновляем готовность для следующей операции
-                if i + 1 < len(operations):
-                    ready[i+1][j] = end_t
-                    queues[i+1].append(j)
-                    total_arrived[i+1] += 1
-                start_t = end_t  # следующий наряд начнётся после этого
-                finished_jobs[i] += 1
-            eq_free_time[i] = end_t
-            started = True
-            break   # на каждой итерации запускаем только одну операцию (можно поменять, но для простоты)
-
+                start_t = max(t, max(ready[i][j] for j in batch_indices), eq_free_time[i])
+                for j in batch_indices:
+                    start_t = max(start_t, ready[i][j])
+                    end_t = schedule_job(i, j, start_t)
+                    if i + 1 < len(operations):
+                        ready[i+1][j] = end_t
+                        queues[i+1].append(j)
+                        total_arrived[i+1] += 1
+                    start_t = end_t
+                    finished_jobs[i] += 1
+                eq_free_time[i] = end_t
+                started = True
+                break   # по одной операции за итерацию
         if not started:
-            # Ни одна операция не может начаться – продвигаем время к ближайшему освобождению или к моменту готовности наряда
             next_t = float('inf')
             for i in range(len(operations)):
                 if eq_free_time[i] > t:
                     next_t = min(next_t, eq_free_time[i])
                 if queues[i]:
-                    # минимальное время готовности ожидающих нарядов
                     min_ready = min(ready[i][j] for j in queues[i])
                     if min_ready > t:
                         next_t = min(next_t, min_ready)
             if next_t == float('inf'):
                 break
             t = next_t
-        # Обновление прогресс-бара
         if progress_bar and iter_count % 10 == 0:
             progress_bar.progress(min(finished_jobs[-1] / m, 1.0), text=f"Обработано {finished_jobs[-1]}/{m} нарядов")
 
     if progress_bar:
         progress_bar.empty()
 
-    # Итоговое время (максимальное окончание среди всех интервалов)
     T = max((end for _, end, _, _ in all_intervals), default=0.0)
     days_needed = math.ceil(T / 24)
 
@@ -389,7 +332,7 @@ while finished_jobs[-1] < m and iter_count < max_iter:
         'base_datetime': base_datetime
     }
 
-# ================== ИНТЕРФЕЙС (без изменений) ==================
+# ================== ИНТЕРФЕЙС ==================
 tab1, tab2, tab3 = st.tabs(["📋 Параметры заказа", "🔧 Операции", "💾 Шаблоны"])
 
 with tab1:
